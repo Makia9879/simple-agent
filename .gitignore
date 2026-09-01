@@ -1,0 +1,3 @@
+# Local copies of upstream open-source projects used for source inspection and adaptation.
+# Keep these repositories locally, but do not commit their full histories or sources.
+/third_party/

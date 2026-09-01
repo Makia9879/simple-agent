@@ -1,6 +1,6 @@
 # Terminal Agent Hub 任务拆分
 
-> 依据：[system-requirements.md](./system-requirements.md) v0.4  
+> 依据：[system-requirements.md](./system-requirements.md) v0.4；程序设计见 [program-design.md](./program-design.md)
 > 日期：2026-09-01  
 > 用法：前端、后端按任务并行开工；任务完成以本表「闭环方式」为准，不设联调验收关卡。
 
@@ -56,7 +56,7 @@
 | 3 | F6 对话，然后 F7 历史用量 | F8 审阅 | B5、B8、B9，B6 齐后 B7 | B6 收尾 |
 | 4 | F9 收口 | F9 收口 | B11 Compose | B10 Provider 契约 |
 
-C0 由 C 先写出 API / SSE 示例，A、B 的 mock 都对着这份契约，不要各写一套路径。只有 2 人时：A 做两套前端，C 做全部后端（含 PI）。
+A、B 直接按 `program-design.md` §6–§7 写 mock；C 同时将同一契约落到 `backend/api/desc/hub.api`，冲突以 `program-design.md` 为准，不各写一套路径。只有 2 人时：A 做两套前端，C 做全部后端（含 PI）。
 
 ### 2.1 甘特图
 
@@ -108,7 +108,7 @@ gantt
 
 ## 3. 共用契约（阶段 0 冻结）
 
-前端 mock 与后端测试都实现下表。细节字段在 C0 写成 OpenAPI / 事件 JSON；本表是范围，不在各任务里自行发明路径。
+前端 mock 与后端测试都实现下表。C 按 `program-design.md` §6–§7 将唯一契约落到 `backend/api/desc/hub.api`；A、B 直接读取本设计做 mock，不另写第二份 OpenAPI 或自行发明路径。
 
 ### 3.1 会话 UI 使用的 API
 
@@ -123,10 +123,10 @@ gantt
 | GET | `/api/v1/conversations` | 自己的会话列表（不含已隐藏） | — |
 | PATCH | `/api/v1/conversations/{id}` | 重命名 | 404 隐藏或不存在 |
 | DELETE | `/api/v1/conversations/{id}` | 对自己隐藏 | 404 |
-| GET | `/api/v1/conversations/{id}/messages` | 分页读可见消息 | 403 跨用户；只读会话仍 200 |
+| GET | `/api/v1/conversations/{id}/messages?since=&limit=` | 按 PI Entry 游标读可见消息 | 403 跨用户；只读会话仍 200 |
 | POST | `/api/v1/conversations/{id}/messages` | 发消息，响应 SSE | 403 无授权；409 生成中；429 并发 |
 | POST | `/api/v1/conversations/{id}/abort` | 中止生成 | 409 当前无生成 |
-| GET | `/api/v1/usage` | 自己的用量，query: 时间/模型 | — |
+| GET | `/api/v1/usage?from=&to=&model_id=` | 自己的用量，按时间/模型筛选 | — |
 
 SSE 事件仅四种：`text_delta`、`usage`、`done`、`error`。`done` 与 `error` 互斥，且每请求只出现一次终止事件。
 
@@ -143,9 +143,9 @@ SSE 事件仅四种：`text_delta`、`usage`、`done`、`error`。`done` 与 `er
 | GET / PATCH | `/models` | 列表；启用/停用 |
 | GET / POST / DELETE | `/grants` | 用户或组的模型授权 |
 | GET | `/users/{id}/effective-models` | 预览最终有效模型 |
-| GET | `/usage` | 按用户、模型、时间 |
+| GET | `/usage?from=&to=&user_id=&model_id=` | 按用户、模型、时间；`user_id` 仅管理员可用 |
 | GET | `/conversations` | 全部会话索引（含用户已隐藏） |
-| GET | `/conversations/{id}/messages` | 分页正文；成功/失败都写审阅审计 |
+| GET | `/conversations/{id}/messages?since=&limit=` | 按 PI Entry 游标读正文；成功/失败都写审阅审计 |
 | GET | `/audit` | 操作审计 |
 
 登记响应字段白名单，不得出现 Key、Token 或可还原凭据。
@@ -175,8 +175,8 @@ SSE 事件仅四种：`text_delta`、`usage`、`done`、`error`。`done` 与 `er
 | F4 | 2 | Provider / Model / 授权页 | AU-04～AU-07 | Provider 只读表；同步中/失败/过期；Model 启停；对用户/组授权；有效模型预览 | 无密钥字段；同步失败保留旧数据；新模型默认停用 | 页面不出现 Key 输入框；能完成「启用模型→授权组→预览用户有效模型」 |
 | F5 | 2 | 会话 UI 模型选择 | CU-02 | 模型下拉/列表、无模型空态、发消息按钮禁用 | 有效列表；空列表；直接写死未授权 ID 时 403 提示 | 无模型时不能发消息；只展示 mock 返回的有效模型 |
 | F6 | 3 | 流式对话与中止 | CU-03、CU-04、CU-05、CU-09 | 新建会话、打字增量、中止、错误气泡、生成中再发送 | 正常流；中止；`error`；409；429；XSS 载荷消息 | 增量可见；中止后不再追加；`done`/`error` 后输入恢复；Markdown 不执行脚本 |
-| F7 | 3 | 历史、只读与自己的用量 | CU-06、CU-07、CU-08 | 列表、打开、重命名、软删除、刷新恢复、授权丢失只读、用量筛选 | 分页消息；隐藏后列表消失；只读仍能看历史；用量含未知 Token | 删除只是对自己消失；只读会话不能发消息；用量表可按模型/日期筛选 |
-| F8 | 3 | 后台用量、会话审阅、审计 | AU-08～AU-12 | 全局用量；全量会话筛选（含已隐藏）；分页正文；审计列表 | 审阅打开正文；PI 暂不可读；无密钥 | 打开正文有「已记录审阅」的界面反馈；不渲染思考链/内部字段 |
+| F7 | 3 | 历史、只读与自己的用量 | CU-06、CU-07、CU-08 | 列表、打开、重命名、软删除、刷新恢复、授权丢失只读、用量筛选 | `since/limit` 消息；隐藏后列表消失；只读仍能看历史；用量含未知 Token | 删除只是对自己消失；只读会话不能发消息；用量表可按模型/日期筛选 |
+| F8 | 3 | 后台用量、会话审阅、审计 | AU-08～AU-12 | 全局用量；全量会话筛选（含已隐藏）；`since/limit` 正文；审计列表 | 审阅打开正文；PI 暂不可读；无密钥 | 打开正文有「已记录审阅」的界面反馈；不渲染思考链/内部字段 |
 | F9 | 4 | 前端收口 | CU-09、§9 Web 安全 | 空态/错误态补齐；CSP 相关头由页面侧可验证的部分 | 错误文案无堆栈/路径/凭据 | 两套 UI 按需求文档的展示范围收口；切真实 API 只改基址，不改页面逻辑 |
 
 前端任务之间的依赖（仅前端内部）：
@@ -200,14 +200,14 @@ SSE 事件仅四种：`text_delta`、`usage`、`done`、`error`。`done` 与 `er
 
 | ID | 阶段 | 任务 | 覆盖需求 | 测什么 | 闭环方式 | 完成标准 |
 |---|---|---|---|---|---|---|
-| C0 | 0 | 冻结 API / SSE / 错误码 | SA-01、§7 | 契约文件本身 | 文档 + 示例 JSON，无运行时 | OpenAPI 或等价文档覆盖 §3；SSE 四事件有例子；403/404/409/429 语义写清 |
+| C0 | 0 | 冻结 API / SSE / 错误码 | SA-01、§7 | `backend/api/desc/hub.api` 唯一契约文件 | 文档 + 示例 JSON，无运行时 | `hub.api` 覆盖本设计 §6；SSE 四事件有例子；403/404/409/429 语义写清 |
 | B0 | 0 | Simple Admin 骨架与测试入口 | AUTH-05 部署侧预备、§9 迁移 | 空项目可测、迁移可跑 | `go test ./...`；迁移脚本 | 模块边界清楚；配置可指向测试库；尚无业务也可跑通测试命令 |
 | B1 | 1 | 身份、Token、首个管理员、入口授权 | AUTH-01～06、CU-01、AU-01 | 登录、哈希、刷新、撤销、禁用后旧 Refresh 失效、登录限流、角色 | 单元测试 + HTTP 脚本打 auth API | 首个管理员可用环境变量/脚本创建；普通用户打 `/admin` 得 403；无前端 |
 | B2 | 2 | 用户、组、成员 | AU-02、AU-03 | CRUD、禁用、重置密码、多组、批量成员 | 表驱动单测 + API 脚本 | 一个用户可属多组；禁用用户不能再登录（与 B1 的禁用语义一致） |
 | B3 | 2 | 有效模型与授权 | SA-02、AU-06、AU-07、§5.1 | `候选 = 用户∪组`；`有效 = 候选∩启用∩Provider可用`；无 Deny；撤销后下一条消息拒绝；历史只读 | **纯函数 + 表驱动单测**（不连 PI） | 文档 §5.1 规则每条有用例；列表接口与发消息校验共用同一计算函数 |
 | B4 | 2 | Provider 无密钥同步 | SA-07、AU-04、AU-05、PI-02、MP-03 | 默认停用新模型；缺失不删授权；失败保留快照并标过期；字段白名单 | fake PI 清单的单测 | 快照无密钥字段；同步失败不破坏既有授权 |
 | B5 | 3 | 会话索引 | SA-05、CU-03、CU-06 | 归属、固定模型、软隐藏、管理员仍能按索引查到 | 单测 + API 脚本 | MySQL 无全文；用户列表不含隐藏；管理查询含隐藏 |
-| B6 | 3 | PI JSONL 适配 | PI-01、PI-03～08、SA-06 | prompt、abort、恢复、分页读正文、工具关闭、无密钥清单 | **fake PI 进程**（stdin/stdout JSONL 脚本）+ 单测 | 不暴露 RPC 给 HTTP；abort 不误作清队列；内部控制项可被过滤函数剥掉 |
+| B6 | 3 | PI JSONL 适配 | PI-01、PI-03～08、SA-06 | prompt、abort、恢复、`since` 游标读正文、工具关闭、无密钥清单 | **fake PI 进程**（stdin/stdout JSONL 脚本）+ 单测 | 不暴露 RPC 给 HTTP；abort 不误作清队列；内部控制项可被过滤函数剥掉 |
 | B7 | 3 | 对话编排与 SSE | SA-03、SA-04、SA-09、§7.2 | 事件映射、`done`/`error` 互斥、同会话 409、并发 429、断线继续、120s 无连接中止、`agent_settled` 才释放 | fake PI + 单测/脚本 | 热路径逻辑可测；不需要真实模型；映射后只有四种对外事件 |
 | B8 | 3 | 用量记账 | SA-08、CU-08、AU-08、MP-04 | 幂等 request ID、未知 Token 不伪造、按用户/模型/时间查询 | 单测 | 重复结束事件不计两次；缺字段标未知 |
 | B9 | 3 | 审计 | SA-10、AU-11、AU-12 | 管理操作审计；审阅先写审计再读正文；失败审阅也记；脱敏 | 单测 | 每次读正文有记录；日志默认无完整正文、无 Key |
@@ -278,7 +278,7 @@ V1 范围外（不要开任务）：Agent 配置、工具、RAG、MCP、CLI/TUI�
 | B3 | 并集、启用、Provider 不可用、撤销立即影响发消息、管理员不自动拥有全部模型 |
 | B4 | 新模型默认停用；清单缺失不删 grant；响应无 secret 字段 |
 | B5 | 软删后 owner 列表空、admin 列表仍在；创建后 model_id 不可改 |
-| B6 | JSONL prompt/abort/read；工具关闭；分页 |
+| B6 | JSONL prompt/abort/read；工具关闭；`since` 游标 |
 | B7 | SSE 映射；409；429；120s 中止；settled 后才接受下一条 |
 | B8 | 两次 done 只记一次；缺 Token 为未知 |
 | B9 | 审阅成功/失败都有审计；无正文入库日志 |

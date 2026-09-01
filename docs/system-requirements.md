@@ -4,6 +4,8 @@
 > 更新日期：2026-09-01  
 > 产品定位：面向单个组织的多用户模型使用与会话管理平台  
 > 架构事实源：[static-architecture.svg](./static-architecture.svg)
+>
+> 程序设计：[program-design.md](./program-design.md)
 
 ![Terminal Agent Hub 分层架构](./static-architecture.svg)
 
