@@ -1,712 +1,508 @@
 # Terminal Agent Hub 系统需求文档
 
-> 文档版本：v0.2（按 Go 直连 Pi 方案重写）  
+> 文档版本：v0.4（最小化修订）  
 > 更新日期：2026-09-01  
-> 产品定位：面向组织的多用户 Agent、模型与工具能力分发平台  
-> 配套架构图：[static-architecture.svg](./static-architecture.svg)
+> 产品定位：面向单个组织的多用户模型使用与会话管理平台  
+> 架构事实源：[static-architecture.svg](./static-architecture.svg)
 
-![Terminal Agent Hub V1 静态架构](./static-architecture.svg)
-
----
-
-## 1. 文档目的
-
-本文定义 Terminal Agent Hub V1 的市场需求、功能范围、技术规格、静态架构、扩展边界与验收标准，作为产品、设计、开发、测试及部署的共同依据。
-
-本版架构基于以下已确认结论：
-
-1. Go 控制面通过 Pi 官方 JSONL RPC 直接管理 Pi Agent；
-2. V1 不引入 Python Agent 服务；
-3. Pi 负责模型调用、Agent Loop、会话、工具与流式事件；
-4. Simple Admin/Go 负责多用户身份、RBAC、模型和 Agent 分发、运行时治理、审计及配额；
-5. V1 不自建 RAG；未来优先适配 Dify、RAGFlow、FastGPT 或其他外部 RAG 服务；
-6. 外部 RAG/MCP/工具以受控连接器或 Pi Extension 的形式接入，不成为核心系统强依赖。
-
-## 2. 背景与产品定义
-
-组织采购 GLM、DeepSeek 等模型后，通常面临以下问题：
-
-- Provider API Key 不适合直接发给每个用户；
-- 不同用户组应获得不同模型、Agent 与工具权限；
-- Web Chat、管理后台与终端 Agent 的身份、权限和审计割裂；
-- 终端 Agent 通常要求用户自行安装、配置密钥，缺少组织级吊销和配额；
-- 第三方工具、MCP 或 RAG 平台需要统一接入、授权、停用和审计。
-
-Terminal Agent Hub 将 Pi 从“个人终端工具”托管为组织级 Agent Runtime，由 Go 控制面向 Web 和终端用户分发其使用权。
-
-**“分发”指分发模型、Agent、工具和连接器的使用权，而不是分发 Provider 密钥。**
-
-## 3. 角色与核心术语
-
-| 名词 | 定义 |
-|---|---|
-| 超级管理员 | 管理系统初始化、管理员、Secret 配置与全局安全策略。 |
-| 管理员 | 管理用户、用户组、Provider、Model、Agent、Extension、Connector、授权、配额和审计。 |
-| 普通用户 | 通过 Web 或 CLI/TUI 使用被授权模型、Agent 和工具的用户。 |
-| 用户组 | RBAC 的主要授权主体，例如研发组、运营组；一个用户可属于多个组。 |
-| Provider | 模型提供商实例；V1 为智谱 GLM 和 DeepSeek。 |
-| Model | Provider 下可被 Pi 调用的模型条目。 |
-| Agent | 基础模型、系统提示词、Skills、Extensions、工具白名单和运行策略的组合。 |
-| Tool | 可由模型调用的能力，包括 Pi 内置工具、自定义工具或由 MCP 映射出的工具。 |
-| Extension | 使用 TypeScript 编写的 Pi 扩展，可注册工具、命令、事件钩子和 Provider。 |
-| Connector | 对外部 MCP、RAG 或 HTTP/CLI 服务的受控连接配置。 |
-| Pi Runtime | 执行 Agent Session、模型调用和 Tool Loop 的 Node.js/TypeScript 进程。 |
-| Runtime Manager | Go 后端中负责启动、恢复、中止、观察和回收 Pi 进程的模块。 |
-| Pi Session | Pi 以 JSONL 保存的会话树，支持消息、工具结果、分支、压缩及用量。 |
-
-### 3.1 “Go CTL”调研结论
-
-`goctl` 是 go-zero 的代码生成 CLI，可生成 HTTP、gRPC、数据库 Model、Dockerfile 与 Kubernetes 脚手架，不是 Admin UI。[S3]
-
-V1 推荐组合为：
-
-- **管理脚手架**：Simple Admin；
-- **后端框架**：go-zero；
-- **代码生成**：goctl；
-- **后台前端**：Vben Admin/Vue 3；
-- **资源授权**：Simple Admin/Casbin 路由权限 + 自研资源 Grant。
-
-Simple Admin 已具备用户、角色、权限、菜单、日志、配置等基础能力，并支持 MySQL 与 Redis 配置，可减少通用后台重复开发。[S1][S2]
-
-### 3.2 Pi 能力边界
-
-Pi 已提供：
-
-- 模型流式输出；
-- `text_delta`、`thinking_delta`、Tool Call 和 Tool Execution 等事件；
-- JSONL RPC 模式；
-- Agent Session、恢复、分支、压缩和 Usage；
-- Skills、Extensions、Pi Packages；
-- `pi.registerTool()` 自定义工具；
-- Provider 与自定义 OpenAI 兼容模型配置。[S9][S10][S11]
-
-Pi 不提供：
-
-- 平台用户和用户组；
-- 多租户/RBAC；
-- 会话所有权；
-- 组织级模型、Extension、MCP 和 RAG 授权；
-- HTTP REST/SSE 管理服务；
-- 内置 MCP Client。
-
-以上平台能力由 Go 控制面补充。Pi RPC 保持服务端内部协议，不直接暴露给浏览器或普通终端。
+![Terminal Agent Hub 分层架构](./static-architecture.svg)
 
 ---
 
-## 4. 市场需求分析
+## 1. 目的与基线结论
 
-### 4.1 按模块分析
+本文定义 Terminal Agent Hub V1 的产品范围、业务对象、功能需求、验收标准和交付边界。架构与术语以最新 SVG 为准。
 
-| 模块 | 用户与市场需求 | 开源参考 | 市场缺口 | V1 策略 | 优先级 |
-|---|---|---|---|---|---|
-| 用户对话前台 | 普通用户需要低门槛多轮对话、流式回复和历史会话。 | Open WebUI 提供自托管、多模型、RBAC 与模型级访问控制实践。[S4][S5] | 通用聊天 UI 与组织终端 Agent、统一 Tool 权限往往割裂。 | 自研轻量 Open WebUI 风格前台，只展示有效授权资源。 | P0 |
-| 后台管理前端 | 管理员需要管理用户、组、模型、Agent、工具与权限，并预览最终授权。 | Simple Admin 提供 Vben Admin 和 RBAC 基础。[S1] | 通用 Admin 缺少 Agent、模型、Tool、Connector 等领域对象。 | 在 Simple Admin 上扩展 Agent Hub 业务菜单。 | P0 |
-| Go 控制面 | 组织需要唯一身份与授权事实源，且 Provider 密钥不下发。 | go-zero/goctl 与 Simple Admin。[S1][S3] | Pi 本身不是多用户管理平台。 | Go 管 RBAC、资源目录、会话归属、Runtime、配额和审计。 | P0 |
-| Pi Runtime | 用户需要模型流式对话、Agent Loop、Tools、Skills 与可恢复会话。 | Pi SDK/RPC/Extension/Session。[S9][S10][S11] | Pi 默认是个人终端 Agent，没有平台多用户治理。 | Go 通过 RPC 托管隔离的 Pi Runtime，Pi 专注执行。 | P0 |
-| 终端客户端 | 开发者希望登录后直接使用组织授权 Agent，无需保存 Provider Key。 | Pi TUI 及 RPC 事件模型。 | 个人 Agent 的密钥、权限和审计难以集中管理。 | 提供薄 CLI/TUI，调用 Go API/SSE，不直接连接 Provider。 | P0 |
-| 模型提供商 | 管理员需要统一接入 GLM、DeepSeek，支持启停、轮换和用量追踪。 | 两家均提供服务端 API/OpenAI 兼容调用。[S7][S8] | API 兼容不代表 Tool/推理/Usage 完全一致。 | 由 Pi Provider 配置接入，Go 管 Provider/Model 目录和凭据引用。 | P0 |
-| Extension/Tool | 管理员需要按 Agent、用户组分发可信工具。 | Pi Extension 可注册工具、拦截调用、动态启停工具。[S11] | 任意扩展拥有高系统权限，普通用户自行安装风险高。 | 扩展由管理员审核发布，运行时使用严格工具白名单。 | P1 |
-| 外部 RAG/MCP | 后续可能需要企业知识库或其他工具，但不希望自建完整 RAG。 | Dify、RAGFlow、FastGPT 均提供知识检索/API；MCP 标准提供工具发现与调用。[S12][S13][S14][S15] | 外部框架协议、结果和授权方式不同。 | 保留 Connector SPI；后续按需适配，不纳入 V1 强依赖。 | P2 |
+V1 基线结论：
 
-### 4.2 目标市场与差异化
+1. 系统由四层组成：两套 Web UI、Simple Admin 后端、PI Agent、模型提供商；
+2. 会话 UI 和后台 UI 是同一 UI 层中的两套独立前端，共用 Simple Admin 身份认证；
+3. 平台分发的是**模型使用权**，不是 Provider API Key；
+4. Simple Admin 管理用户、用户组、模型授权、用量、会话索引和审计；
+5. PI Agent 执行真实对话、保存会话正文并调用智谱 GLM 或 DeepSeek；
+6. Provider Key 只配置在 PI Agent 侧，不进入 Simple Admin、浏览器或业务数据库；
+7. V1 是纯模型对话产品，不引入 Agent 配置、工具、Extension、RAG、MCP 或终端客户端；
+8. V1 按“一套部署服务一个组织”设计，用户组不是租户。
 
-| 维度 | 定义 |
+### 1.1 本版采用的产品默认值
+
+以下默认值用于收口 V1；若产品决策变化，应先更新本文再实施：
+
+| 事项 | V1 默认值 |
 |---|---|
-| 初始客户 | 10～500 人的研发团队、AI 平台团队、教育/培训团队及统一采购模型的组织。 |
-| 购买者 | IT 管理员、研发负责人、AI 平台负责人。 |
-| 使用者 | Web Chat 业务用户及终端 Agent 开发者。 |
-| 核心价值 | 一次接入模型，按组分发模型、Agent 和工具；密钥集中；Web/终端统一身份和审计。 |
-| 差异化 | Simple Admin RBAC + Pi Agent Runtime + Web/终端双入口 + 可治理的扩展连接器。 |
-| 架构原则 | 核心保持精简；非核心能力优先通过 Pi Package、Extension、MCP 或外部服务扩展。 |
+| 对话对象 | 用户选择已授权 Model，不配置独立 Agent。 |
+| PI 工具 | 不开放 `bash`、`read`、`write` 等工具，也不加载业务 Extension。 |
+| 客户端 | 只提供会话 UI 和后台 UI，不提供 CLI/TUI。 |
+| 角色 | 普通用户、管理员两级。 |
+| 管理员聊天 | 管理员可进入会话 UI；只有管理员可进入后台 UI。 |
+| Provider Key | 由运维人员在 PI Agent 侧配置，Simple Admin 只同步无密钥登记。 |
+| 会话正文 | PI Session 是正文事实源；Simple Admin 只保存索引和归属。 |
+| 会话删除 | 用户删除仅对自己隐藏；PI Session 保留供管理员审阅，按保留期统一清理。 |
+| 用量控制 | V1 只记账和查看；仅对并发执行硬限制。 |
 
-### 4.3 V1 成功指标
+---
+
+## 2. 产品定义
+
+Terminal Agent Hub 让组织集中接入 GLM、DeepSeek 等模型，并按用户或用户组分配模型使用权。用户通过会话 UI 聊天，管理员通过后台 UI 管理授权、查看用量和审阅会话。模型密钥始终留在 PI Agent 层。
+
+### 2.1 两套 Web 入口
+
+| 前端 | 访问者 | 登录后页面 | 核心职责 |
+|---|---|---|---|
+| 会话 UI | 普通用户、管理员 | Open WebUI 风格 Web Chat | 选择已授权模型、流式对话、查看自己的历史和用量。 |
+| 后台 UI | 管理员 | Simple Admin 管理页面 | 管理用户/组/模型授权，查看全局用量、用户会话和无密钥 Provider 登记。 |
+
+两套前端业务线分开：会话 UI 不提供管理功能，后台 UI 不承担聊天功能。
+
+### 2.2 用户价值
+
+- 用户无需获取或配置 Provider Key；
+- 用户只看到组织分配给自己的模型；
+- 用户可在浏览器中进行多轮、流式对话并恢复历史；
+- 管理员可按用户组统一授权模型；
+- 管理员可按用户和模型查看用量；
+- 管理员可审阅用户会话内容并留下审阅记录。
+
+### 2.3 V1 成功指标
 
 | 指标 | 目标 |
 |---|---|
-| 初次部署 | Docker Compose 文档化环境 30 分钟内启动并可登录。 |
-| 授权效率 | 管理员在 5 分钟内完成“建组→模型→Agent→授权”。 |
-| 权限生效 | 一般授权变更 60 秒内生效；用户/模型/Agent 禁用立即阻止新请求。 |
-| 平台附加延迟 | 不计上游模型，首事件附加延迟 P95 小于 300 ms。 |
-| 密钥安全 | 浏览器、CLI、普通日志、Session JSONL 中不出现 Provider Key。 |
-| 可审计性 | 每次模型和工具调用可追溯用户、Agent、模型、授权来源、时间和结果。 |
+| 初次部署 | 在文档化环境中通过 Docker Compose 30 分钟内启动并可登录。 |
+| 授权效率 | 管理员 5 分钟内完成“建组→加入用户→授权模型”。 |
+| 权限生效 | 禁用用户、模型或撤销授权后，新对话请求在 5 秒内被拒绝；新增授权 60 秒内可见。 |
+| 流式性能 | PI 会话已就绪的热路径中，不计 Provider 耗时，首事件平台附加延迟 P95 小于 300 ms。 |
+| 密钥安全 | 浏览器、Simple Admin API/数据库、普通日志和会话正文中不出现 Provider Key。 |
+| 可审计性 | 模型调用和管理员会话审阅均可追溯到操作者、对象、时间和结果。 |
 
 ---
 
-## 5. 权限模型
+## 3. 角色、术语与领域对象
 
-### 5.1 资源授权规则
-
-1. 授权主体支持用户组和单个用户；推荐以组为主；
-2. V1 采用加法式授权：用户有效权限为角色、所属组与直接授权的并集；
-3. 资源类型至少包括 `model`、`agent`、`tool`、`connector`；
-4. Agent 的有效使用权要求用户同时拥有 Agent 及其基础模型权限；
-5. Tool 的有效使用权为：
-
-```text
-平台启用 Tool
-∩ Agent Tool 白名单
-∩ 用户/组 Tool 授权
-∩ Runtime 安全策略
-```
-
-6. Connector/RAG 的有效使用权要求用户拥有 Connector 及目标外部资源映射权限；
-7. 用户、Provider、Model、Agent、Tool 或 Connector 任一禁用，新请求必须拒绝；
-8. UI 隐藏不是授权，Go API 在列资源与执行时都必须鉴权；
-9. V1 不实现显式 Deny；未来引入时 Deny 应高于 Allow。
-
-### 5.2 角色能力
+### 3.1 角色
 
 | 角色 | 能力 |
 |---|---|
-| 超级管理员 | 全部权限、Secret 管理、系统初始化和可信扩展发布。 |
-| 管理员 | 用户/组、模型、Agent、工具、Connector、授权、审计和用量管理；不能读取密钥明文。 |
-| 普通用户 | 使用获授权资源、管理自己的会话。 |
-| 禁用/待审核用户 | 不得登录或发起新执行。 |
+| 普通用户 | 登录会话 UI；使用已授权模型；查看和管理自己的会话；查看自己的用量。 |
+| 管理员 | 拥有普通用户能力；登录后台 UI；管理用户、组和模型授权；查看全局用量、全部会话及 Provider 登记。 |
 
----
+### 3.2 核心术语
 
-## 6. V1 范围
+| 术语 | 定义 |
+|---|---|
+| 会话 UI | 面向用户的独立 Web 前端，交互参考 Open WebUI。 |
+| 后台 UI | 面向管理员的独立 Web 管理前端。 |
+| Simple Admin | 两套 UI 共用的后端，负责身份、RBAC、业务数据、PI 调用编排和审计。 |
+| 用户 | 可登录系统的组织成员，拥有唯一身份和状态。 |
+| 用户组 | 用户集合，是模型授权的主要主体；一个用户可属于多个组。 |
+| Provider | 外部模型提供商，V1 为智谱 GLM 和 DeepSeek。 |
+| Provider 登记 | PI Agent 已认证 Provider 的无密钥快照，包括名称、类型、状态、模型清单和同步时间。 |
+| Model | PI Agent 可调用、且可由 Simple Admin 授权给用户的具体模型。 |
+| 模型授权 | 用户或用户组使用某个 Model 的许可。 |
+| 会话 | 用户围绕一个 Model 发起的一组连续消息。 |
+| PI Session | PI Agent 保存的真实会话正文及恢复引用。 |
+| 用量 | 一次模型调用产生的输入、输出及其他可获得的 Token 计量和调用状态。 |
+| 会话审阅 | 管理员通过后台 UI 读取某个用户会话正文的受审计操作。 |
+| 会话软删除 | 用户从自己的会话列表隐藏会话；后台索引和 PI Session 正文继续保留。 |
 
-### 6.1 范围内
+### 3.3 领域对象图
 
-- 本地账号密码登录、JWT、用户启停；
-- 用户、用户组及组成员管理；
-- GLM、DeepSeek Provider 与 Model 管理；
-- Agent 配置与按组/用户授权；
-- Open WebUI 风格 Web Chat；
-- Pi 流式事件转 SSE；
-- 多轮会话、新建、恢复、重命名、删除和中止；
-- Go Runtime Manager 直接管理 Pi RPC 进程；
-- CLI/TUI 登录、资源列表、会话、恢复和中止；
-- 调用用量、管理操作和工具调用审计；
-- Docker Compose 单机交付；
-- 为 Extension、MCP 和第三方 RAG 保留领域模型及接口边界，但不要求 V1 完成 RAG 集成。
-
-### 6.2 V1 不包含
-
-- Python Agent 服务；
-- 自建 RAG 的文档解析、切片、Embedding、向量库、检索和 Rerank；
-- Dify/RAGFlow/FastGPT 的正式连接器实现；
-- 内置 MCP Client；
-- 用户自行安装 Extension/Pi Package/MCP Server；
-- 企业 OIDC/LDAP/SCIM；
-- 多租户商业计费；
-- 自动跨 Provider 降级；
-- Kubernetes 多节点 Runtime 调度；
-- 将服务端 Pi Runtime 下发至用户本机运行。
-
----
-
-## 7. 功能需求
-
-### 7.1 用户对话前台
-
-| ID | 需求点 | 技术规格 | 实现简述 | 验收标准 | 优先级 |
-|---|---|---|---|---|---|
-| FE-01 | 登录 | HTTPS；短期 Access Token + 可轮换 Refresh Token。 | 调用 Go Auth API；Web 优先 HttpOnly/Secure Cookie。 | 禁用/待审核用户不可登录。 | P0 |
-| FE-02 | 可用资源 | 仅展示用户有效 Model/Agent。 | Go 计算组授权、直接授权和资源状态。 | 未授权资源不可见，直接构造 ID 返回 403。 | P0 |
-| FE-03 | 多轮会话 | 会话绑定 owner、Agent/Model、Pi Session。 | Go 创建会话映射并启动/恢复 Pi Session。 | 刷新后可恢复活动分支消息。 | P0 |
-| FE-04 | 流式输出 | SSE 支持文本、思考状态、工具状态、Usage、Done/Error。 | Go 将 Pi RPC 事件转换为稳定 SSE 协议。 | 增量顺序正确；一次流只出现一个终止事件。 | P0 |
-| FE-05 | 消息展示 | Markdown、安全代码高亮、复制、停止、重新生成。 | 前端安全渲染；停止映射 Pi `abort`。 | 不执行消息中的脚本；停止后不再追加输出。 | P0 |
-| FE-06 | 会话管理 | 列表、搜索、重命名、删除；仅本人访问。 | MySQL 保存会话索引和归属；Pi JSONL 保存执行历史。 | 跨用户读取返回 404/403。 | P0 |
-| FE-07 | 工具状态 | 展示允许公开的工具名称、状态和脱敏结果摘要。 | Go 过滤 Pi Tool 事件，隐藏敏感参数/结果。 | 不泄露路径、密钥和内部堆栈。 | P1 |
-
-### 7.2 后台管理
-
-| ID | 需求点 | 技术规格 | 实现简述 | 验收标准 | 优先级 |
-|---|---|---|---|---|---|
-| AD-01 | 用户管理 | 创建、编辑、禁用、重置密码。 | 扩展 Simple Admin 用户模块。 | 禁用后无法刷新 Token 或执行新请求。 | P0 |
-| AD-02 | 用户组 | 组 CRUD、成员批量加入/移除；一人多组。 | `groups`、`user_groups` 多对多。 | 组变更在 60 秒内反映到资源列表。 | P0 |
-| AD-03 | Provider | GLM/DeepSeek 类型、Base URL、Secret 引用、超时、启停。 | 密钥写 Secret Store/密文，读取接口只返回掩码。 | 密钥不返回前端；连通性测试通过。 | P0 |
-| AD-04 | Model | 上游 ID、展示名、上下文、能力、启停。 | Provider 与 Model 一对多。 | 停用后新请求立即拒绝。 | P0 |
-| AD-05 | Agent | 基础模型、系统提示词、Skills、Extension、工具白名单、运行参数。 | 保存声明式 AgentSpec，由 Runtime Manager 生成 Pi 配置。 | 用户只能使用已授权且配置有效的 Agent。 | P0 |
-| AD-06 | 资源授权 | 对 Model/Agent/Tool/Connector 按组或用户授权；权限预览。 | 统一 `resource_grants` 表。 | 预览结果与实际执行权限一致。 | P0 |
-| AD-07 | Runtime 管理 | 查看活动数、用户、会话、启动时间、状态；支持强制中止。 | Runtime Manager 暴露只读状态和管理操作。 | 中止后进程及租约在超时内释放。 | P0 |
-| AD-08 | Extension/Tool 目录 | 登记可信包、版本、校验和、工具列表、状态。 | 仅管理员发布；镜像或可信包仓固定版本。 | 普通用户不能上传或启用任意代码。 | P1 |
-| AD-09 | Connector 目录 | 预留 HTTP、MCP、RAG 类型、Endpoint、Secret、能力、状态。 | Connector 配置版本化，不在 V1 强制执行。 | 数据模型和 API 可创建禁用的占位 Connector。 | P2 |
-| AD-10 | 配额审计 | 请求、并发、Token；登录、授权、模型与工具调用日志。 | Redis 限流/租约，MySQL 记录用量和审计。 | 可按用户、模型、Agent、Tool、时间查询。 | P0 |
-
-### 7.3 Go 控制面与 Runtime Manager
-
-| ID | 需求点 | 技术规格 | 实现简述 | 验收标准 | 优先级 |
-|---|---|---|---|---|---|
-| GO-01 | 统一 API | REST/JSON `/api/v1`；OpenAPI；SSE。 | go-zero API + goctl 骨架。 | 契约测试覆盖 API 与 SSE。 | P0 |
-| GO-02 | 双层鉴权 | 管理路由权限 + Model/Agent/Tool 资源权限。 | Casbin 管路由，Resource Grant 管业务资源。 | 越权请求全部拒绝。 | P0 |
-| GO-03 | Pi 进程管理 | `os/exec`、stdin/stdout pipe、严格 LF JSONL；超时/中止/回收。 | 独立 Runtime Manager，不在 HTTP Handler 中散落进程逻辑。 | 异常退出、超时和取消无僵尸进程。 | P0 |
-| GO-04 | RPC 客户端 | 支持 prompt、abort、new/switch session、state、messages、usage。 | 请求 ID 关联 response；事件异步分发。 | 并发命令和事件不串会话。 | P0 |
-| GO-05 | SSE 转换 | 将 Pi `message_update`、tool、retry、compaction、settled 转内部协议。 | 每条流设置 request_id、conversation_id。 | `done/error` 互斥且唯一。 | P0 |
-| GO-06 | 会话归属 | MySQL 映射平台会话与 Pi session ID/file；路径不含用户名。 | 每次恢复前检查 owner 与资源权限。 | A 用户无法打开 B 用户 session。 | P0 |
-| GO-07 | Runtime 配置 | 独立 cwd、session dir、`PI_CODING_AGENT_DIR`、模型范围、工具范围。 | 从 AgentSpec 生成短期运行配置；密钥通过环境引用。 | Session JSONL 和启动参数中无 Provider Key。 | P0 |
-| GO-08 | 进程并发策略 | V1 每活动会话一个 Runtime 或受控 Worker；Redis 租约。 | 进程空闲关闭；Session 保留后可恢复。 | 并发上限可配置，超额返回 429。 | P0 |
-| GO-09 | 日志与追踪 | request_id/trace_id/user_id/conversation_id/pi_session_id。 | 结构化日志，敏感字段脱敏。 | 一次调用可串联 Go、Pi 和 Provider。 | P0 |
-| GO-10 | 大行读取 | 不使用默认 64 KB 限制的 Scanner，或显式扩大 Buffer。 | 使用 LF Reader/自定义 decoder，限制总消息大小。 | 大 Tool Result JSONL 不导致 Runtime 客户端崩溃。 | P0 |
-
-### 7.4 Pi Runtime
-
-| ID | 需求点 | 技术规格 | 实现简述 | 验收标准 | 优先级 |
-|---|---|---|---|---|---|
-| PI-01 | RPC 模式 | `pi --mode rpc`；stdin/stdout JSONL。 | Go 启动并完成状态探测。 | prompt 后收到 response、流事件和 settled。 | P0 |
-| PI-02 | 模型调用 | GLM 通过 OpenAI 兼容自定义 Provider；DeepSeek 使用内置/兼容 Provider。 | Runtime 使用服务端生成的模型配置和环境密钥。 | 两家普通流、错误、超时契约测试通过。 | P0 |
-| PI-03 | Session | 持久 JSONL、恢复、分支、压缩和 Usage。 | 每个会话独立 session dir；Go 保存映射。 | 重启 Runtime 后可恢复上下文。 | P0 |
-| PI-04 | 流式事件 | 文本、Thinking、Tool Call、Tool Result、Usage、Settled。 | Go 订阅并转换。 | 流事件顺序和归属正确。 | P0 |
-| PI-05 | 工具白名单 | 使用 `--tools`、`--exclude-tools`、`--no-builtin-tools` 或 Active Tools。 | AgentSpec 决定最终工具集合。 | Prompt 无法启用未授权工具。 | P0 |
-| PI-06 | Extension | 只加载管理员批准、固定版本、校验通过的 Extension/Pi Package。 | 项目级动态资源默认不信任；运行镜像固定可信扩展。 | 未批准扩展不会加载。 | P1 |
-| PI-07 | 沙箱 | 高风险 read/write/bash 工具在容器/受限目录运行。 | 最小文件权限、网络策略、CPU/内存/时长限制。 | Runtime 无法读取其他用户目录或平台 Secret。 | P0 |
-| PI-08 | 扩展状态 | Extension 状态使用 Pi Session Entry/Tool Result 保存。 | 状态随 Session 恢复，不写共享全局可变文件。 | 会话间扩展状态不串线。 | P1 |
-
-### 7.5 终端客户端
-
-| ID | 需求点 | 技术规格 | 实现简述 | 验收标准 | 优先级 |
-|---|---|---|---|---|---|
-| CLI-01 | 登录 | 浏览器/设备码优先，密码备选；只保存平台 Token。 | 调用 Go Auth API。 | 本地不保存 Provider Key。 | P0 |
-| CLI-02 | 资源列表 | 展示有效 Agent/Model。 | 调用 `/me/resources`。 | 与 Web 有效资源一致。 | P0 |
-| CLI-03 | 流式会话 | 文本、工具状态、Ctrl+C 中止。 | 消费 Go SSE/WebSocket，不直接连 Pi RPC。 | 中止后 Runtime 被通知且资源释放。 | P0 |
-| CLI-04 | 会话恢复 | 列表、恢复自己的平台会话。 | Go 查 owner 并恢复 Pi session。 | 网络/进程重启后可恢复持久消息。 | P0 |
-| CLI-05 | 本地文件边界 | V1 不静默上传用户本机目录。 | 文件上下文必须由用户显式选择。 | 未选择文件时无本地内容上传。 | P0 |
-
-### 7.6 模型提供商
-
-| ID | 需求点 | 技术规格 | 实现简述 | 验收标准 | 优先级 |
-|---|---|---|---|---|---|
-| MP-01 | GLM | Base URL、API Key、模型 ID；OpenAI 兼容配置。 | Go 生成 Pi Provider/Model 配置。[S7] | 普通流、401、429、5xx、超时测试通过。 | P0 |
-| MP-02 | DeepSeek | OpenAI 兼容 API、模型 ID、Tool/Thinking 能力声明。 | Pi 内置或自定义 Provider 配置。[S8] | 与 GLM 核心契约一致。 | P0 |
-| MP-03 | 密钥管理 | Secret 引用、版本、轮换、掩码展示。 | 密钥只进入 Pi 进程环境/内存。 | 前端、日志、session 无明文。 | P0 |
-| MP-04 | 模型能力 | reasoning、tool、vision、context、max output。 | Model 目录保存能力标签，启动前校验 AgentSpec。 | 不兼容 Agent 配置不可启动。 | P1 |
-| MP-05 | 健康状态 | 连通性、认证、429/5xx、延迟。 | 管理员测试 + 运行指标。 | 故障返回稳定业务错误，不泄露上游敏感信息。 | P1 |
-
----
-
-## 8. 外部 RAG、MCP 与工具扩展敞口
-
-### 8.1 设计目标
-
-V1 不建设知识库基础设施，但必须避免未来接入外部 RAG 时改造核心会话与权限模型。
-
-目标是让外部能力满足：
-
-```text
-注册 Connector
-→ 管理员配置 Endpoint/Secret
-→ 绑定 Agent
-→ 按用户组授权
-→ Pi 以 Tool 调用
-→ 结果归一并进入上下文
-→ 平台记录审计
+```mermaid
+erDiagram
+    USER }o--o{ GROUP : belongs_to
+    USER ||--o{ MODEL_GRANT : receives
+    GROUP ||--o{ MODEL_GRANT : receives
+    MODEL ||--o{ MODEL_GRANT : authorizes
+    PROVIDER_REGISTRATION ||--o{ MODEL : reports
+    USER ||--o{ CONVERSATION : owns
+    MODEL ||--o{ CONVERSATION : used_by
+    CONVERSATION ||--|| PI_SESSION : references
+    CONVERSATION ||--o{ USAGE_RECORD : produces
+    USER ||--o{ USAGE_RECORD : incurs
+    MODEL ||--o{ USAGE_RECORD : measures
+    ADMIN_REVIEW }o--|| CONVERSATION : reads
+    USER ||--o{ ADMIN_REVIEW : performs_as_admin
 ```
 
-### 8.2 支持的扩展形态
+约束：
 
-| 形态 | 调用链 | 适用场景 | 是否需要 Python |
+- `ProviderRegistration` 不包含 Key、Token 或可还原凭据；
+- 一个会话固定归属一个用户，并在 V1 中固定使用一个模型；
+- PI Session 保存正文，Simple Admin 保存 `conversation_id → pi_session_ref` 映射；
+- 用户软删除只改变自己的可见状态，不删除后台索引或 PI Session；
+- 用量是调用记录，不是独立可授权资源。
+
+---
+
+## 4. 范围
+
+### 4.1 V1 范围内
+
+- 本地账号密码登录、Token 刷新、退出和用户启停；
+- 用户由管理员创建和重置密码，不提供自助注册或忘记密码流程；
+- 首个管理员通过 Compose 环境变量或初始化脚本引导创建；
+- 普通用户、管理员两级角色；
+- 用户、用户组和成员关系管理；
+- PI Agent Provider/Model 无密钥同步；
+- Model 启用、停用及按用户/用户组授权；
+- Open WebUI 风格会话 UI；
+- 多轮对话、SSE 流式回复、中止和历史恢复；
+- 用户查看自己的用量；
+- 管理员按用户、模型和时间查看用量；
+- 管理员查看全部会话列表与可见正文；
+- 管理操作和会话审阅审计；模型调用状态合并记录在用量中；
+- 智谱 GLM、DeepSeek；
+- Docker Compose 单组织部署。
+
+### 4.2 V1 范围外
+
+- Agent 模板、系统提示词产品化及技能编排；
+- 模型工具调用和本地文件/命令执行；
+- 第三方知识库与外部工具连接；
+- CLI/TUI 和桌面客户端；
+- 重新生成回复、编辑已发送消息；
+- 上传文件或图片；
+- 会话创建后切换模型；
+- 企业 SSO、跨组织多租户和商业计费；
+- 多节点 PI 调度与自动 Provider 故障切换。
+
+---
+
+## 5. 权限与用量规则
+
+### 5.1 模型授权
+
+授权主体支持用户和用户组。V1 采用加法式 Allow：
+
+```text
+候选模型 = 用户直接授权模型 ∪ 用户所属组授权模型
+有效模型 = 候选模型 ∩ 模型启用 ∩ Provider 当前可用
+```
+
+规则：
+
+1. 推荐通过用户组授权，直接用户授权用于例外场景；
+2. 用户属于多个组时，授权取并集；
+3. V1 不提供显式 Deny；
+4. 模型列表接口和对话接口必须分别鉴权，UI 隐藏不构成安全边界；
+5. 用户、模型或 Provider 不可用时，不允许创建新会话或继续发起新消息；
+6. 撤销授权立即影响下一次消息，不强制删除已有会话；历史会话变为只读；
+7. 恢复历史会话前重新计算权限；模型重新获得授权后可继续；
+8. 管理员进入会话 UI 时也遵守模型授权；管理员要自测聊天，必须先给自己授权；
+9. Model 授权绑定稳定标识 `provider + upstream_model_id`，平台可另设内部 ID；
+10. PI 新同步的 Model 默认停用，管理员启用后才能授权和展示；
+11. PI 清单暂时缺少已登记 Model 时，保留既有授权并将 Model 标为不可用，不自动删除授权。
+
+### 5.2 后台访问
+
+- 只有管理员可访问后台 UI 和 `/admin` API；
+- 管理员可查看全部用户的会话列表和正文；
+- 普通用户只能读取自己的会话，跨用户访问返回 403 或不泄露对象存在性的 404；
+- 每次管理员读取会话正文都创建审阅审计记录；
+- 管理员无权通过后台读取 Provider Key。
+
+### 5.3 用量计量
+
+每次模型调用至少记录：
+
+- request ID、conversation ID；
+- user ID、model ID；
+- 开始时间、结束时间和状态；
+- PI/Provider 可返回的输入 Token、输出 Token、缓存 Token 和总 Token。
+
+展示规则：
+
+- 用户可按模型和时间查看自己的用量；
+- 管理员可按用户、模型和时间查看用量；
+- Provider 未返回精确 Token 时标记为“未知”，不得伪造估算值；
+- 用户和系统并发上限可配置，超过时返回 429。
+
+---
+
+## 6. 功能需求
+
+### 6.1 会话 UI
+
+| ID | 需求 | 规格与验收标准 | 优先级 |
 |---|---|---|---|
-| Pi 原生 Extension | Pi `registerTool` → 外部 HTTP/CLI | 自有 API、逻辑简单、性能要求明确。 | 否 |
-| Go Connector API | Pi Extension → Go → 外部 RAG | 需要集中 RBAC、密钥、审计与协议归一。 | 否 |
-| MCP Client Extension | Pi → MCP Client Extension → MCP Server | 外部能力已提供 MCP，或希望标准化工具发现。 | 否 |
-| 外部 RAG HTTP Adapter | Pi/Go → Dify/RAGFlow/FastGPT API | 使用成熟第三方知识库和检索能力。 | 否 |
-| Python 专用适配器 | Go/Pi → 独立 Python 服务 | 仅当依赖 Python 独有解析/ML 库时按需加入。 | 可选，非核心 |
+| CU-01 | 会话 UI 登录 | 用户在独立登录页认证成功后进入 Web Chat；禁用用户不可登录或刷新 Token。 | P0 |
+| CU-02 | 模型选择 | 只展示当前有效模型；无有效模型时显示空态且不能发消息；直接构造未授权 model ID 返回 403。 | P0 |
+| CU-03 | 新建会话 | 选择模型后创建会话；会话绑定当前用户、模型和 PI Session 引用，创建后不能切换模型。 | P0 |
+| CU-04 | 流式对话 | 用户消息发送到 Simple Admin，由 PI Agent 执行；回复通过 SSE 增量展示。 | P0 |
+| CU-05 | 中止生成 | 用户可停止当前生成；停止后不再追加文本，并显示已中止状态。 | P0 |
+| CU-06 | 历史会话 | 用户可列出、打开和重命名自己的会话；删除仅对自己隐藏，管理员仍可审阅；不能读取其他用户会话。 | P0 |
+| CU-07 | 会话恢复 | 页面刷新或 PI 会话重新加载后可恢复可见消息；失去模型授权时只能读取历史。 | P0 |
+| CU-08 | 自己的用量 | 用户可按日期和模型查看调用次数、Token 和错误状态。 | P0 |
+| CU-09 | 安全渲染 | Markdown 和代码块不得执行消息中的脚本；错误信息不得包含内部路径、堆栈或凭据。 | P0 |
 
-### 8.3 RAG Connector 能力类型
+### 6.2 后台 UI
 
-未来 Connector 应显式声明能力，避免把“检索”和“完整外部 Agent”混为一谈：
+| ID | 需求 | 规格与验收标准 | 优先级 |
+|---|---|---|---|
+| AU-01 | 后台登录 | 只有管理员登录后可进入管理页面；普通用户访问后台时返回 403 或跳转无权限页。 | P0 |
+| AU-02 | 用户管理 | 创建、编辑、禁用用户，重置密码，查看所属组和状态。 | P0 |
+| AU-03 | 用户组管理 | 创建、编辑、禁用用户组，批量加入或移除成员；一个用户可属于多个组。 | P0 |
+| AU-04 | Provider 登记 | 只读展示 PI 已认证 Provider 的名称、类型、状态、模型和同步时间，不显示或录入 Key。 | P0 |
+| AU-05 | 登记同步 | 进入 Provider 页面时自动尝试同步，并支持手动刷新；失败时保留上次快照并标记过期。 | P0 |
+| AU-06 | Model 管理 | 以 `provider + upstream_model_id` 识别模型；新同步模型默认停用；缺失模型标为不可用但不删除授权。 | P0 |
+| AU-07 | 模型授权 | 对用户或用户组增加/撤销已启用 Model 授权，并预览某用户的最终有效模型。 | P0 |
+| AU-08 | 全局用量 | 按用户、模型和时间查看调用次数、Token 与状态。 | P0 |
+| AU-09 | 会话列表 | 查看所有用户发起的会话，按用户、模型、状态和时间筛选。 | P0 |
+| AU-10 | 会话正文 | 按条目分页读取可见消息；内部协议字段和不可展示的推理数据被过滤，禁止一次返回长会话全文。 | P0 |
+| AU-11 | 审阅审计 | 打开会话正文时记录管理员、会话、用户、时间、结果和 trace ID。 | P0 |
+| AU-12 | 操作审计 | 记录登录、用户/组变更、Model 启停、授权和 Provider 同步。 | P0 |
 
-| 能力 | 说明 |
+### 6.3 双 SPA 认证
+
+| ID | 需求 | 规格与验收标准 | 优先级 |
+|---|---|---|---|
+| AUTH-01 | 统一身份 | 两套 SPA 使用同一 Simple Admin 用户库和 Auth API，不维护两套账号。 | P0 |
+| AUTH-02 | 入口授权 | 角色决定可访问的 UI 和 API；管理员可进入两套 UI，普通用户只能进入会话 UI。 | P0 |
+| AUTH-03 | 会话安全 | Cookie 使用 `HttpOnly`；生产环境必须 HTTPS 并启用 `Secure`，本地 HTTP 开发可关闭 `Secure`；Refresh Token 可轮换和撤销。 | P0 |
+| AUTH-04 | 部署域 | 推荐两套 SPA 经同一反向代理域名发布；若使用子域，Cookie Domain、SameSite 和 CORS 必须使用明确允许列表。 | P0 |
+| AUTH-05 | 账号提供 | 不提供自助注册或忘记密码；管理员创建用户、重置密码；首个管理员由部署引导创建。 | P0 |
+| AUTH-06 | 登录限流 | 登录接口按账号和来源地址限流，连续失败触发短期冷却并记录安全日志。 | P0 |
+
+### 6.4 Simple Admin 后端
+
+| ID | 需求 | 规格与验收标准 | 优先级 |
+|---|---|---|---|
+| SA-01 | API 边界 | 向两套 UI 提供版本化 REST API；流式对话使用 SSE；PI 内部协议不暴露给浏览器。 | P0 |
+| SA-02 | 有效模型计算 | 根据用户、组、授权、Model 状态和 Provider 状态返回模型列表，并在发消息时重新校验。 | P0 |
+| SA-03 | 对话编排 | 创建、恢复、中止 PI 会话；同一会话已有生成时，新 prompt 返回 409，不做隐式排队。 | P0 |
+| SA-04 | 流式转换 | 将 PI 流式事件转换为稳定 SSE；每条事件含 request ID 和 conversation ID。 | P0 |
+| SA-05 | 会话索引 | 保存 owner、model、title、状态、用户隐藏标记、pi_session_ref 和时间，不在 MySQL 复制会话全文。 | P0 |
+| SA-06 | 正文读取 | 从 PI Session 按条目分页读取并过滤正文；PI 不可用时明确显示暂不可读。 | P0 |
+| SA-07 | Provider 同步 | 以 `provider + upstream_model_id` 更新无密钥快照；新增 Model 默认停用，暂时缺失的 Model 和授权不删除。 | P0 |
+| SA-08 | 用量记账 | 接收 PI/Provider Usage 并幂等写入；重复结束事件不得重复计费。 | P0 |
+| SA-09 | 并发保护 | 对用户和系统活动生成数实施可配置并发限制，超限返回 429。 | P0 |
+| SA-10 | 审计 | 管理操作和会话审阅写审计；模型调用状态合并到用量记录，不重复写调用审计；敏感内容脱敏。 | P0 |
+
+### 6.5 PI Agent
+
+| ID | 需求 | 规格与验收标准 | 优先级 |
+|---|---|---|---|
+| PI-01 | Provider 认证 | 在 PI 侧配置并持有 GLM/DeepSeek 凭据；凭据不通过 Simple Admin 管理接口传递。 | P0 |
+| PI-02 | 无密钥清单 | 向 Simple Admin 返回 Provider 类型、状态和模型清单，不返回 Key 或可还原凭据。 | P0 |
+| PI-03 | 多轮对话 | 接收 Simple Admin 请求，调用指定 Provider/Model 并保持 PI Session 上下文。 | P0 |
+| PI-04 | 流式输出 | 输出文本增量、消息结束、Usage、错误和 `agent_settled` 等必要事件。 | P0 |
+| PI-05 | 会话恢复 | 通过受控 session reference 恢复对话；Simple Admin 负责验证平台会话所有权。 | P0 |
+| PI-06 | 中止 | 支持中止当前生成；`abort` 仅终止活动执行，不能被错误地当作队列清理。 | P0 |
+| PI-07 | 纯对话模式 | V1 启动配置关闭模型工具；用户消息不能触发文件、命令或外部工具执行。 | P0 |
+| PI-08 | 正文读取 | 向 Simple Admin 提供可分页读取的会话消息；内部控制项由 Simple Admin 过滤后展示。 | P0 |
+
+Simple Admin 通过 PI JSONL RPC（stdin/stdout）编排会话；V1 每个活动会话使用一个 PI 进程，空闲后可回收，不增加独立 Agent 服务层；PI RPC 不暴露给浏览器。
+
+### 6.6 模型提供商
+
+| ID | 需求 | 规格与验收标准 | 优先级 |
+|---|---|---|---|
+| MP-01 | 智谱 GLM | PI 侧可配置对应 Base URL、Key 和模型 ID；普通流、401、429、5xx、超时测试通过。 | P0 |
+| MP-02 | DeepSeek | PI 侧可配置对应 Base URL、Key 和模型 ID；验收场景与 GLM 一致。 | P0 |
+| MP-03 | 状态报告 | PI 将认证、可用性和模型清单以无密钥形式报告给 Simple Admin。 | P0 |
+| MP-04 | Usage | 上游返回 Usage 时原样归一；字段缺失时明确标记未知。 | P0 |
+
+---
+
+## 7. 流式与会话协议
+
+### 7.1 对外 SSE 最小事件
+
+| 事件 | 关键字段 | 说明 |
+|---|---|---|
+| `text_delta` | request_id, conversation_id, delta | 追加助手文本。 |
+| `usage` | request_id, input_tokens, output_tokens, total_tokens | 可选；Provider 未提供时不发送伪造值。 |
+| `done` | request_id, finish_reason | 正常完成或用户中止后的唯一结束事件。 |
+| `error` | request_id, code, message | 失败结束事件；与 `done` 互斥。 |
+
+V1 不向会话 UI 展示原始思考链。若 Provider 返回 reasoning 数据，默认不转发；未来需要展示时，应另行定义脱敏后的公开事件。
+
+### 7.2 状态规则
+
+1. `done` 与 `error` 互斥，且一条请求只能出现一次终止事件；
+2. PI `message_end` 表示助手消息完成，`agent_settled` 表示本轮执行完全结束；平台以 `agent_settled` 释放活动状态；
+3. 流式生成期间再次向同一会话发送 prompt，Simple Admin 返回 409；
+4. 用户中止调用 PI `abort`，并等待 settled/退出确认；
+5. 客户端断线后生成在服务端继续；连续 120 秒无客户端连接时中止未完成生成；用户重连后拉取最终可见结果和状态；
+6. 用量写入使用 request ID 幂等。
+
+### 7.3 会话正文展示
+
+会话 UI 和后台 UI展示以下内容：
+
+- 用户消息；
+- 助手最终可见回复；
+- 消息时间、模型和状态；
+- 中止或错误标记。
+
+长会话正文按条目分页读取，API 不一次返回全部历史。
+
+以下内容默认不展示：
+
+- Provider Key、认证头和内部配置；
+- 原始思考链；
+- PI 内部控制事件、内部路径和进程信息；
+- 未脱敏错误堆栈。
+
+---
+
+## 8. 架构与数据职责
+
+### 8.1 分层职责
+
+| 层/组件 | 负责 | 数据边界 |
+|---|---|---|
+| 会话 UI | 登录、模型选择、聊天、自己的会话和用量。 | 只接收当前用户获授权的数据。 |
+| 后台 UI | 用户/组、Model 授权、全局用量、会话审阅、Provider 登记。 | 不接收 Provider Key。 |
+| Simple Admin | 身份/RBAC、有效模型、JSONL RPC 对话编排、会话索引、用量、审计、无密钥同步。 | 保存平台业务数据，不保存会话全文或 Provider Key。 |
+| PI Agent | Provider 认证、模型调用、流式执行、PI Session 正文。 | 每活动会话一个可回收进程；持有 Provider Key，只返回无密钥状态。 |
+| GLM/DeepSeek | 模型推理和上游 Usage。 | 仅由 PI Agent 调用。 |
+
+### 8.2 用户对话调用链
+
+1. 用户在会话 UI 登录；
+2. Simple Admin 返回有效 Model；
+3. 用户创建或打开会话；
+4. Simple Admin 校验用户状态、Model 授权和并发限制；
+5. Simple Admin 创建或恢复 PI Session，并发送 prompt；
+6. PI Agent 使用其内部凭据调用 GLM 或 DeepSeek；
+7. Simple Admin 将 PI 事件转换为 SSE 返回会话 UI；
+8. PI Agent 保存正文，Simple Admin 保存会话索引、用量和审计。
+
+### 8.3 管理员会话审阅调用链
+
+1. 管理员登录后台 UI；
+2. 后台从 Simple Admin 查询会话索引；
+3. 管理员打开会话；
+4. Simple Admin 校验管理员角色并先创建审阅审计；
+5. Simple Admin 根据 `pi_session_ref` 获取正文并过滤内部内容；
+6. 后台 UI 展示用户、模型、可见消息和状态。
+
+### 8.4 Provider 登记同步链
+
+1. Provider Key 由运维人员在 PI Agent 侧安全配置；
+2. 管理员打开 Provider 页面或点击刷新；
+3. Simple Admin 向 PI Agent 查询已认证 Provider 和模型；
+4. PI Agent 返回不含密钥的清单与状态；
+5. Simple Admin 更新本地快照，并在后台显示同步时间；
+6. 同步失败时保留旧快照并标记为过期，不自动删除授权。
+
+### 8.5 数据存储
+
+| 数据 | 事实源 | 说明 |
+|---|---|---|
+| 用户、组、角色、Model 授权 | Simple Admin 数据库 | 权限事实源。 |
+| Provider/Model 登记 | PI Agent；Simple Admin 保存无密钥快照 | PI 状态优先，后台快照用于管理展示。 |
+| 会话索引与归属 | Simple Admin 数据库 | 包含 owner、model、用户隐藏标记和 pi_session_ref，不含全文。 |
+| 会话正文 | PI Session | 用户软删除后仍保留；由 Simple Admin 分页读取和过滤，达到保留期后统一清理。 |
+| 用量与审计 | Simple Admin 数据库 | request ID 保证幂等。 |
+| Provider Key | PI Agent 侧受保护凭据配置 | 不进入 Simple Admin 数据链路。 |
+
+---
+
+## 9. 非功能与安全需求
+
+| 类别 | 要求 | 验收口径 |
+|---|---|---|
+| 隔离 | 普通用户只能访问自己的会话和用量。 | 跨用户 API 测试全部拒绝。 |
+| 密钥 | Key 只存在于 PI Agent 受保护配置和调用内存。 | UI、Simple Admin API/DB、日志和 Session 扫描零泄漏。 |
+| 认证 | 密码使用强哈希；Token 可撤销和轮换。 | 用户禁用后旧 Refresh Token 不可换新。 |
+| 授权 | 每次发送消息、恢复会话和后台审阅都服务端鉴权。 | 绕过 UI 构造请求仍被拒绝。 |
+| 会话审阅 | 管理员查看正文必须可追踪。 | 每次成功/失败审阅都有审计记录。 |
+| 性能 | 热路径平台附加首事件延迟 P95 < 300 ms。 | 在约定基准硬件和压测模型下通过。 |
+| 并发 | 在基准硬件上压测并记录单实例稳定 SSE 容量。 | 测试范围内无跨会话串流，容量报告记录错误率和资源曲线。 |
+| 可靠性 | PI/Provider 超时、429、5xx 和断流返回稳定错误。 | 请求最终进入完成、中止或失败状态。 |
+| 可观测性 | request ID/trace ID 串联 Simple Admin、PI 和 Provider。 | 可由一次请求定位调用、用量和错误。 |
+| 部署 | Compose 固定依赖版本并提供健康检查、迁移和持久卷。 | 空环境按文档 30 分钟内可用。 |
+
+安全约束：
+
+1. Provider Key 不通过命令行参数传入，避免出现在进程列表；优先使用 PI 支持的受保护配置文件或部署 Secret 注入；
+2. PI 凭据文件采用最小文件权限，Simple Admin 数据库账号无权读取；
+3. Provider 登记响应使用字段白名单，未知字段不会直接透传后台；
+4. 会话正文按敏感数据处理，管理员审阅权限默认关闭给普通用户；
+5. 日志记录消息 ID 和状态，默认不记录完整消息正文；
+6. Web 端设置 CSP、CSRF 防护、严格 CORS 和安全 Cookie；
+7. 用户删除会话仅设置隐藏标记；后台索引和 PI Session 保留供审阅，正文仅由保留期清理任务物理删除，审计元数据按审计策略保存。
+
+---
+
+## 10. 测试与发布门槛
+
+### 10.1 必测场景
+
+| 测试类型 | 核心场景 |
 |---|---|
-| `retrieval` | 输入 query 和检索参数，返回文本片段、分数、标题、来源及 metadata；由 Pi 完成最终生成。 |
-| `chat_app` | 调用外部 RAG 应用并获得完整答案；平台只代理和审计，模型/Tool Loop 可能由外部平台控制。 |
-| `mcp_tools` | 通过 MCP `tools/list` 与 `tools/call` 暴露一个或多个工具。 |
-| `http_tool` | 固定 HTTP API 映射为单个 Pi Tool。 |
-| `cli_tool` | 受控 CLI 映射为 Pi Tool，仅在沙箱内运行。 |
+| 身份测试 | 两套 UI 登录、管理员入口、用户禁用、Token 刷新和退出。 |
+| 授权测试 | 直接授权、组授权、多组并集、撤销、Model/Provider 不可用。 |
+| 会话测试 | 新建、多轮、固定模型、恢复、中止、并发 prompt 409、用户软删除、管理员仍可审阅和跨用户访问。 |
+| 流式测试 | text delta、done/error 互斥、agent settled、断线后继续、120 秒无连接中止和重复结束事件。 |
+| Provider 测试 | GLM/DeepSeek 普通流、401、429、5xx、超时、无密钥清单。 |
+| 用量测试 | 精确 Usage、未知 Usage、幂等写入及按用户/模型查询。 |
+| 后台审阅 | 管理员查看列表/正文、普通用户拒绝、每次读取写审计。 |
+| 安全测试 | Key 泄漏、XSS、CSRF、越权、错误信息和日志脱敏。 |
+| 性能测试 | 热路径首事件延迟、并发 SSE 容量记录、长会话分页读取。 |
+| 部署测试 | 空环境 Compose 启动、首个管理员引导、迁移、重启恢复和持久卷。 |
 
-V1 后续优先实现 `retrieval`，因为它保留 Pi 对最终模型、会话和生成过程的控制。
+### 10.2 V1 发布门槛
 
-### 8.4 推荐的统一检索协议
-
-内部标准请求：
-
-```json
-{
-  "connector_id": "rag-1",
-  "source_id": "kb-123",
-  "query": "用户问题",
-  "top_k": 5,
-  "score_threshold": 0.3,
-  "filters": {},
-  "request_id": "req-..."
-}
-```
-
-内部标准结果：
-
-```json
-{
-  "records": [
-    {
-      "content": "检索片段",
-      "score": 0.91,
-      "title": "文档标题",
-      "source_uri": "external://document/123",
-      "metadata": {}
-    }
-  ]
-}
-```
-
-Dify 已定义包含 `knowledge_id`、`query`、`top_k`、`score_threshold` 与 `records` 的外部知识检索契约；RAGFlow 提供 HTTP API 和检索能力；FastGPT 提供知识库搜索 API。因此以上内部协议可作为多个框架的最小公共模型。[S12][S13][S14]
-
-### 8.5 RAG/Connector 权限要求
-
-1. 外部 API Key 只保存在 Secret Store，不进入模型上下文；
-2. 模型生成的 `source_id` 不可信，最终 source 范围必须来自 Go 下发的授权配置；
-3. Connector 请求携带平台生成的短期身份/作用域，不能让模型自报 user_id；
-4. 返回内容按大小和 Token 上限截断；完整结果不得无界写入上下文；
-5. 记录 connector_id、source_id、query 摘要、结果数量、耗时和状态；
-6. 外部内容视为不可信输入，不能覆盖平台 RBAC 或工具策略；
-7. MCP Server 的 Tool 注释和 Schema 同样视为不可信，需管理员审核并设置允许范围；
-8. 普通用户不可填写任意外部 Endpoint，防止 SSRF 和数据外传。
-
-### 8.6 Pi MCP 扩展说明
-
-Pi 核心不内置 MCP Client。接入 MCP 必须：
-
-1. 安装可信的第三方 Pi MCP Extension；或
-2. 自研 MCP Client Extension，将 `tools/list` 映射为 `pi.registerTool()`，将调用映射为 `tools/call`。
-
-MCP 标准允许 Server 暴露工具名称、描述、输入 Schema 和结构化/非结构化结果，但客户端仍需自行完成信任、授权、结果校验及 UI 行为。[S15]
-
-### 8.7 Extension 安全
-
-Pi Extension 以运行进程权限执行任意代码。平台必须：
-
-- 只从管理员配置的可信仓库安装；
-- 固定版本/commit 和完整性校验；
-- 在构建或发布阶段审核依赖；
-- 禁止普通用户安装任意包；
-- 在容器或沙箱运行高风险工具；
-- 使用 AgentSpec 和 RBAC 决定 Active Tools；
-- 记录 Tool Call 与结果摘要；
-- 限制网络出口、文件路径、CPU、内存和执行时间。
+- 所有 P0 需求通过；
+- GLM、DeepSeek 至少各一个 Model 完成端到端对话；
+- 普通用户越权测试零失败；
+- Provider Key 泄漏扫描零发现；
+- 管理员能查看会话正文，且每次审阅均产生审计；
+- 用量记录无重复计数；
+- 完成并发容量压测报告，测试范围内无跨会话串流；
+- Docker Compose 在空环境完成首个管理员引导和部署验收；
+- 完成“PI 配置 Provider→后台同步→建组授权→用户对话→用量→管理员审阅”完整闭环。
 
 ---
 
-## 9. 技术规格
+## 11. 实施阶段
 
-### 9.1 推荐技术栈
-
-| 层 | 技术规格 | 理由 |
+| 阶段 | 目标 | 交付与完成标准 |
 |---|---|---|
-| Web Admin/Chat | Vue 3、TypeScript、Vite、Vben Admin | 复用 Simple Admin 生态并共享认证/API SDK。 |
-| Go 控制面 | Go、go-zero、goctl、Simple Admin、Casbin、Ent | 管理、RBAC、API、Runtime 编排集中在一种后端语言。 |
-| Pi Runtime | `@earendil-works/pi-coding-agent`、Node.js/TypeScript、JSONL RPC | 原生 Agent、Session、Streaming、Tools 与 Extensions。 |
-| 终端 | Go 单二进制或 Node/Python 薄 CLI；只调用平台 API | 客户端语言不影响核心架构。 |
-| 数据库 | MySQL 8.0+、utf8mb4、InnoDB | 平台主数据、会话索引、用量和审计。 |
-| 缓存 | Redis 7+ | RBAC 缓存、限流、Runtime 租约和短期状态。 |
-| 网关 | Nginx/Caddy、TLS、SSE 代理 | 统一入口和流式代理。 |
-| 交付 | Docker Compose、固定镜像版本、迁移 | V1 快速部署。 |
-| 可观测性 | OpenTelemetry、Prometheus、JSON 日志 | 串联 Go、Pi 和 Provider。 |
-| 外部扩展 | Pi Extension、Pi Package、MCP Client Extension、HTTP Adapter | RAG/工具按需接入，不污染核心。 |
+| M0 纵向闭环 | 验证架构最短路径。 | Simple Admin 骨架、首个管理员引导、会话 UI 登录、一个 PI Provider/Model、单轮 SSE 对话走通。 |
+| M1 身份与授权 | 完成组织内模型分配。 | 用户、组、Model 同步/启停、直接/组授权、有效模型列表和并发保护。 |
+| M2 会话与用量 | 完成多轮使用和管理审阅。 | 会话历史/恢复/中止、用量、后台会话列表/正文和审阅审计。 |
+| M3 交付 | 达到可部署和可运维状态。 | DeepSeek/GLM 契约、安全测试、压测、监控、备份和 Compose 文档。 |
 
-### 9.2 建议仓库结构
+---
 
-```text
-terminal-agent-hub/
-├── apps/
-│   ├── web-admin/
-│   ├── web-chat/
-│   ├── control-plane/          # Go API、领域逻辑、Runtime Manager
-│   └── terminal-cli/
-├── runtime/
-│   ├── trusted-extensions/     # 审核并锁定版本的 Pi 扩展
-│   ├── skills/
-│   └── image/                  # Pi Runtime 镜像
-├── connectors/
-│   ├── contracts/              # Connector/RAG/MCP 内部契约
-│   └── examples/               # 后续适配器，不是 V1 强依赖
-├── packages/
-│   ├── api-contracts/
-│   └── ui/
-├── deploy/
-│   ├── compose/
-│   └── migrations/
-└── docs/
-```
+## 12. 待确认事项
 
-### 9.3 Runtime Manager 接口建议
+以下事项不改变当前四层架构，但应在对应阶段开工前确认：
 
-```go
-type RuntimeManager interface {
-    Start(ctx context.Context, spec RuntimeSpec) (RuntimeID, error)
-    Resume(ctx context.Context, sessionRef SessionRef, spec RuntimeSpec) (RuntimeID, error)
-    Prompt(ctx context.Context, id RuntimeID, command PromptCommand) (<-chan Event, error)
-    Abort(ctx context.Context, id RuntimeID) error
-    State(ctx context.Context, id RuntimeID) (RuntimeState, error)
-    Close(ctx context.Context, id RuntimeID) error
-}
-```
-
-模块内部负责：
-
-- 命令/响应 ID 关联；
-- LF JSONL 编解码；
-- stdout 事件广播；
-- stderr 日志脱敏；
-- 进程树终止；
-- 并发租约；
-- Session 目录；
-- SSE 事件转换；
-- 空闲回收和恢复。
-
-### 9.4 主要数据实体
-
-| 实体 | 关键字段/关系 | 说明 |
+| 事项 | 当前默认 | 最迟确认阶段 |
 |---|---|---|
-| users | id, username, password_hash, status, role | 平台身份。 |
-| groups | id, name, status | 用户组。 |
-| user_groups | user_id, group_id | 用户组成员关系。 |
-| providers | id, type, base_url, secret_ref, status, config_version | GLM/DeepSeek 实例。 |
-| models | id, provider_id, upstream_id, capabilities, status | 模型目录。 |
-| agents | id, base_model_id, system_prompt, runtime_policy, status | Agent 主配置。 |
-| agent_resources | agent_id, resource_type, resource_id, config | Agent 绑定 Skill/Extension/Tool/Connector。 |
-| resources | id, type, name, version, status, metadata | Tool/Extension/Connector 统一目录或视图。 |
-| resource_grants | resource_type, resource_id, principal_type, principal_id, permission | 用户/组资源授权。 |
-| conversations | id, owner_id, agent_id, model_id, title, status | 平台会话索引。 |
-| pi_sessions | conversation_id, pi_session_id, session_ref, leaf_id, state | Pi Session 映射。 |
-| runtime_instances | id, conversation_id, node_id, pid_ref, lease, state | 活动 Runtime 状态。 |
-| connector_configs | id, type, endpoint, secret_ref, capabilities, status | 后续外部连接器。 |
-| external_resources | connector_id, external_id, type, metadata, status | 外部知识库/应用映射。 |
-| usage_records | request_id, user_id, model_id, tokens, latency, status | 模型用量。 |
-| tool_audits | request_id, tool_id, connector_id, args_redacted, status, latency | 工具/Connector 审计。 |
-| audit_events | actor_id, action, target, trace_id, metadata_redacted | 管理审计。 |
-
-### 9.5 API 草案
-
-| 方法与路径 | 用途 |
-|---|---|
-| `POST /api/v1/auth/login` | 登录。 |
-| `POST /api/v1/auth/refresh` | Token 轮换。 |
-| `GET /api/v1/me/resources` | 有效 Model/Agent/Tool。 |
-| `POST /api/v1/conversations` | 创建会话。 |
-| `GET /api/v1/conversations` | 查询自己的会话。 |
-| `GET /api/v1/conversations/{id}/messages` | 查询过滤后的 Pi Session 消息。 |
-| `POST /api/v1/conversations/{id}/messages` | 发消息并返回 SSE。 |
-| `POST /api/v1/requests/{id}/cancel` | 中止 Pi 执行。 |
-| `/api/v1/admin/users/*` | 用户管理。 |
-| `/api/v1/admin/groups/*` | 用户组管理。 |
-| `/api/v1/admin/providers/*` | Provider 管理。 |
-| `/api/v1/admin/models/*` | Model 管理。 |
-| `/api/v1/admin/agents/*` | Agent 管理。 |
-| `/api/v1/admin/resources/*` | Extension/Tool/Connector 目录。 |
-| `/api/v1/admin/grants/*` | 授权和权限预览。 |
-| `/api/v1/admin/runtimes/*` | Runtime 观察和中止。 |
-| `/api/v1/admin/audits/*` | 审计和用量。 |
-
-### 9.6 SSE 事件草案
-
-```text
-event: text_delta
-data: {"request_id":"...","delta":"你好"}
-
-event: tool_start
-data: {"request_id":"...","tool_call_id":"...","name":"search_knowledge"}
-
-event: tool_end
-data: {"request_id":"...","tool_call_id":"...","is_error":false}
-
-event: usage
-data: {"input_tokens":100,"output_tokens":20}
-
-event: done
-data: {"finish_reason":"stop"}
-```
-
-要求：
-
-- 所有事件含 `request_id`；
-- Tool 参数和结果按展示策略脱敏；
-- `done` 与 `error` 互斥且只出现一次；
-- 以 Pi `message_end` 为消息最终状态，以 `agent_settled` 为运行完全结束状态。
+| GLM 区域 | Base URL 可配置；中国区或 Z.AI 海外区未锁定。 | M0 |
+| PI 侧凭据运维 | 由部署运维人员通过受保护配置完成，不经过后台 UI。 | M0 |
+| 会话保留期 | 用户删除仅软隐藏；正文由保留期任务物理清理，具体天数未定。 | M2 |
+| 原始思考内容 | V1 不展示、不作为会话正文提供给管理员。 | M2 |
+| 管理员分级 | V1 只有一个管理员角色；是否拆分审阅权限以后再定。 | M3 |
+| 基准硬件 | 热路径延迟和并发容量压测的基准硬件待部署环境确定。 | M3 |
 
 ---
 
-## 10. 静态架构说明
+## 13. 调研来源
 
-### 10.1 核心调用链
-
-#### Web/终端对话
-
-1. 用户登录 Go 控制面；
-2. Go 返回有效 Model/Agent；
-3. 用户创建或恢复平台会话；
-4. Go 检查用户、组、Agent、Model、Tool、配额和会话所有权；
-5. Runtime Manager 从 AgentSpec 生成隔离配置；
-6. Go 启动或恢复 `pi --mode rpc`；
-7. Go 向 Pi 发送 prompt；
-8. Pi 调用 GLM/DeepSeek，并按白名单调用工具；
-9. Go 将 Pi JSONL 事件转换为 SSE；
-10. Go 保存会话索引、用量和审计，Pi JSONL 保存执行历史。
-
-#### 后续外部 RAG
-
-1. 管理员注册并测试 RAG Connector；
-2. 管理员映射外部知识库并绑定 Agent；
-3. Go 只向 Runtime 下发用户获授权的 Connector/source；
-4. Pi Extension 将 `search_knowledge` 注册为 Tool；
-5. Pi Tool 通过 Go Adapter、HTTP 或 MCP 调用外部 RAG；
-6. 检索片段归一、截断后作为 Tool Result 返回 Pi；
-7. Pi 使用被检索内容生成答案；
-8. Go 记录 Connector 和来源审计。
-
-### 10.2 组件职责
-
-| 组件 | 负责 | 不负责 |
-|---|---|---|
-| Web Admin | 管理操作、权限预览、审计查询。 | 不调用 Provider，不持有密钥。 |
-| Web Chat | 对话和历史展示。 | 不作为最终授权判断方。 |
-| CLI/TUI | 平台登录和流式交互。 | 不直连 Pi RPC/Provider。 |
-| Go 控制面 | 身份、RBAC、目录、会话归属、Runtime、SSE、配额、审计。 | 不实现模型 Agent Loop，不自建 RAG。 |
-| Pi Runtime | 模型、Session、Agent Loop、Skills、Extensions、Tools。 | 不管理平台用户/组/RBAC。 |
-| MySQL | 业务主数据、会话索引、用量和审计。 | 不保存可读取的密钥明文。 |
-| Redis | 缓存、限流、租约和活动状态。 | 不作为最终权限事实源。 |
-| 外部 RAG/MCP | 检索、知识库或外部工具。 | 不决定平台用户授权。 |
-
-### 10.3 存储策略
-
-- Pi Session JSONL 是 Agent 执行历史和恢复上下文的事实源；
-- MySQL 保存平台会话归属、标题、索引、Pi Session 引用、用量与审计；
-- Web 历史消息由 Go 读取/转换 Pi Session，并过滤不应展示的内部内容；
-- V1 单机使用持久卷；未来多节点需对象存储/共享存储或 Session 节点亲和；
-- 删除平台会话必须同步删除或进入延迟清理的 Pi Session 文件。
-
----
-
-## 11. 非功能需求
-
-| 类别 | 需求 | V1 验收口径 |
-|---|---|---|
-| 安全 | 密钥集中、日志脱敏、最小权限、可信扩展。 | 前端、CLI、日志、Session 无 Provider/Connector Key。 |
-| 权限一致性 | UI、API、Runtime 工具集合一致。 | 构造未授权 model/agent/tool 请求均被拒绝。 |
-| 进程隔离 | 用户 cwd、session、env 和进程隔离。 | A 用户不能读取 B 用户文件、Session 或工具结果。 |
-| 性能 | Go 不显著增加首事件延迟。 | 不计 Provider，附加 P95 < 300 ms。 |
-| 并发 | V1 单实例至少支持 100 条并发流，硬件规格随压测记录。 | 无串流、僵尸进程或持续内存泄漏。 |
-| 可靠性 | 超时、中止、429/5xx、断流可控。 | 资源最终释放；错误码稳定；消息不重复写入。 |
-| 可观测性 | 全链路 trace 和 Runtime 指标。 | 可由 request_id 定位 Go、Pi、Provider/Connector。 |
-| 可维护性 | Runtime Manager 与 Connector SPI 为深模块。 | Handler 不直接操作 pipes；新 Connector 不改核心会话流程。 |
-| 可扩展性 | Tool/Connector 能力声明和统一授权。 | 新 HTTP Retrieval Connector 只需 Adapter、配置与契约测试。 |
-| 可部署性 | Docker Compose 一键启动。 | 空环境启动 Web、Go、Pi、MySQL、Redis。 |
-| 隐私 | 默认不记录完整思考链、Secret 或敏感 Tool Result。 | 日志抽查和自动 Secret 扫描零发现。 |
-
----
-
-## 12. 安全重点
-
-1. Provider/Connector Secret 优先使用 Vault、云 Secret Manager 或 KMS；
-2. Pi Runtime 使用独立、最小化环境，不继承 Go 进程的所有 Secret；
-3. Extension/Pi Package 运行任意代码，必须管理员审核和版本锁定；
-4. `bash/write/edit` 默认不对所有 Agent 开放；
-5. MCP/RAG Endpoint 由管理员配置并限制内网/出口，防止 SSRF；
-6. Tool 参数必须重新校验，不能信任模型生成的路径、用户 ID、知识库 ID；
-7. Runtime 必须设置 CPU、内存、文件、进程数和总执行时限；
-8. 会话所有权每次恢复都检查，不能仅依赖 session_path 难以猜测；
-9. 管理操作、模型调用和工具调用均写不可变审计摘要。
-
----
-
-## 13. 测试与验收
-
-| 测试 | 核心场景 |
-|---|---|
-| 单元测试 | RBAC、Agent 有效资源交集、配额、路径和事件转换。 |
-| Pi RPC 契约 | prompt、response、text delta、tool、abort、settled、非法 JSON、大行、进程退出。 |
-| Provider 契约 | GLM/DeepSeek 普通流、401、429、5xx、超时和 Usage。 |
-| 集成测试 | 建组→模型→Agent→授权→用户对话→恢复→审计。 |
-| 越权测试 | 未授权模型、跨用户 session、未授权 Tool、篡改 conversation ID。 |
-| 隔离测试 | 多用户 Runtime 的 cwd、env、session、process 和结果隔离。 |
-| 前端 E2E | 登录、流式回复、停止、历史、授权变更。 |
-| 性能测试 | 100 并发 SSE、Runtime 启停峰值、长会话和 Redis 限流。 |
-| 扩展安全 | 未批准 Extension、危险 Tool、SSRF Endpoint、Secret 泄漏。 |
-| Connector 契约（后续） | 空结果、超时、鉴权、结果截断、Citation、Schema 差异。 |
-
-### 13.1 V1 发布门槛
-
-- 所有 P0 完成；
-- GLM 与 DeepSeek 契约测试通过；
-- RBAC 越权测试零失败；
-- Secret 泄漏检查零发现；
-- Runtime 超时/中止后无僵尸进程；
-- Docker Compose 空环境启动成功；
-- 100 并发流无跨会话串流；
-- 完成“用户组→模型→Agent→授权→Web/终端使用→审计”闭环。
-
----
-
-## 14. 实施阶段
-
-| 阶段 | 目标 | 交付 |
-|---|---|---|
-| M0 技术验证 | 验证 Go↔Pi 和两家模型。 | Go RPC Client、Pi 流式事件、GLM/DeepSeek、abort/session resume。 |
-| M1 控制面 | 完成用户、组、资源和授权。 | Model/Agent/Grant、权限预览、Secret 管理。 |
-| M2 Web Chat | 完成用户对话闭环。 | 会话、SSE、历史、停止和用量。 |
-| M3 终端 | 完成薄 CLI/TUI。 | 登录、资源列表、流式会话、恢复。 |
-| M4 交付 | 安全、审计、压测、部署。 | Compose、迁移、监控、备份和发布验收。 |
-| M5 可选连接器 | 按真实客户需求适配外部能力。 | 优先选定一个 RAG/MCP 平台，按 Connector SPI 实现。 |
-
----
-
-## 15. 风险与待确认
-
-### 15.1 主要风险
-
-| 风险 | 影响 | 缓解 |
-|---|---|---|
-| goctl 被误认为完整 Admin | 低估开发量。 | 使用 Simple Admin，goctl 只做生成。 |
-| Pi 无平台多用户 | 会话越权。 | Go 保存 owner/session 映射并逐次鉴权。 |
-| 每会话进程成本 | 高并发资源压力。 | 空闲回收、限流、Worker/Node SDK 服务作为后续优化。 |
-| Extension 权限过高 | RCE/数据泄漏。 | 可信发布、固定版本、沙箱、Tool 白名单。 |
-| Pi Session 本地存储 | 多节点迁移困难。 | V1 单机持久卷；预留 session_ref 和节点亲和。 |
-| 外部 RAG 协议差异 | Adapter 维护成本。 | 能力声明、统一最小结果模型、契约测试。 |
-| MCP Tool 动态变化 | Tool 审核与缓存不一致。 | 固定允许列表、定期同步、变更需管理员确认。 |
-
-### 15.2 开工前待确认
-
-1. 终端 Agent 是否始终服务端运行？本文按服务端 Pi + 薄 CLI 设计；
-2. GLM 使用智谱中国区还是 Z.AI 海外区？
-3. 普通用户是否允许创建 Agent？本文按仅管理员创建；
-4. V1 是否开放任何内置文件/命令工具，还是纯对话？
-5. Pi Session 的数据保留期和管理员可见范围是什么？
-6. 目标并发、操作系统和单机资源规格是多少？
-7. 后续首个 RAG 适配对象更倾向 Dify、RAGFlow、FastGPT 还是 MCP Server？这不阻塞 V1。
-
----
-
-## 16. 调研来源
-
-- **[S1] Simple Admin** — go-zero、Vben Admin、Ent、Casbin 与后台基础能力：  
+- **[S1] Simple Admin** — go-zero、Vben Admin、RBAC 和后台基础能力：  
   https://github.com/suyuan32/simple-admin
-- **[S2] Simple Admin 配置** — MySQL/PostgreSQL/SQLite 与 Redis：  
-  https://doc.ryansu.tech/guide/basic-config/configurations.html
-- **[S3] goctl 官方文档** — go-zero 代码生成 CLI：  
+- **[S2] goctl** — go-zero 代码生成工具：  
   https://go-zero.dev/reference/cli-guide/
-- **[S4] Open WebUI** — 自托管、多模型和多用户参考：  
+- **[S3] Open WebUI** — 会话 UI 交互参考：  
   https://github.com/open-webui/open-webui
-- **[S5] Open WebUI RBAC** — Roles、Groups 与资源 ACL：  
+- **[S4] Open WebUI RBAC** — 用户组与模型访问控制参考：  
   https://docs.openwebui.com/features/authentication-access/rbac/
-- **[S6] Open WebUI Models** — 模型级用户/组访问控制：  
-  https://docs.openwebui.com/features/workspace/models/
-- **[S7] 智谱/Z.AI Python SDK 与兼容 API说明**：  
-  https://github.com/zai-org/z-ai-sdk-python
-- **[S8] DeepSeek API** — OpenAI 兼容、流式与 Tool Calls：  
-  https://api-docs.deepseek.com/
-- **[S9] Pi Coding Agent** — 模型、Runtime、Tools、Skills 与运行模式：  
+- **[S5] PI Coding Agent** — 模型、会话和运行模式：  
   https://github.com/earendil-works/pi-mono/tree/main/packages/coding-agent
-- **[S10] Pi RPC** — LF JSONL、事件流、Session 命令及非 Node 集成：  
+- **[S6] PI RPC** — JSONL 命令、流式事件和会话控制：  
   https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/rpc.md
-- **[S11] Pi Extensions** — `registerTool`、事件钩子、动态工具与安全说明：  
-  https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/extensions.md
-- **[S12] Dify Knowledge API** — 知识库检索、结果及 API Key：  
-  https://docs.dify.ai/en/api-reference/guides/knowledge
-- **[S13] RAGFlow HTTP API** — Dataset、Chat 与 OpenAI 兼容接口：  
-  https://ragflow.io/docs/http_api_reference
-- **[S14] FastGPT Knowledge API** — 知识库搜索 API 与检索参数：  
-  https://doc.fastgpt.io/zh-CN/openapi/dataset
-- **[S15] MCP Tools Specification** — 工具发现、Schema、调用和结果：  
-  https://modelcontextprotocol.io/specification/2025-06-18/server/tools
+- **[S7] PI Session Format** — JSONL 会话结构与恢复：  
+  https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/session-format.md
+- **[S8] 智谱/Z.AI API**：  
+  https://github.com/zai-org/z-ai-sdk-python
+- **[S9] DeepSeek API**：  
+  https://api-docs.deepseek.com/
 
-> 正式商用前需复核所有开源项目与依赖的许可证、安全公告、维护状态，并固定到具体版本/commit。Pi Package 和 Extension 具有运行时代码权限，不能仅因“开源”而默认可信。
+> 正式实施前应固定 Simple Admin、go-zero、PI Agent 及前端依赖版本，并复核许可证、安全公告和 Provider API 兼容性。
