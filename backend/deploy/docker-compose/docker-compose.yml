@@ -1,0 +1,90 @@
+name: terminal-agent-hub
+services:
+  mysql:
+    image: mysql:8.4.4
+    environment:
+      MYSQL_DATABASE: tah
+      MYSQL_USER: tah
+      MYSQL_PASSWORD_FILE: /run/secrets/mysql_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+    secrets: [mysql_password, mysql_root_password]
+    volumes: [mysql_data:/var/lib/mysql]
+    healthcheck:
+      test: [CMD-SHELL, "mysqladmin ping -h 127.0.0.1 -uroot -p$$(cat /run/secrets/mysql_root_password) --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --appendonly, "yes"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  migrate:
+    image: mysql:8.4.4
+    depends_on:
+      mysql: {condition: service_healthy}
+    secrets: [mysql_password]
+    volumes:
+      - ../../rpc/ent/migrate:/migrations:ro
+    entrypoint: [sh, -ec]
+    command: ["mysql -hmysql -utah -p$$(cat /run/secrets/mysql_password) tah < /migrations/001_hub.sql"]
+    restart: "no"
+  core-rpc:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile
+    environment:
+      TAH_LISTEN_ADDR: :8081
+      TAH_BOOTSTRAP_ADMIN_USERNAME: ${TAH_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      TAH_BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
+    secrets: [bootstrap_admin_password]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1:8081/healthz]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+  core-api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker-compose/Dockerfile
+    environment:
+      TAH_LISTEN_ADDR: :8080
+      TAH_COOKIE_SECURE: ${TAH_COOKIE_SECURE:-true}
+      TAH_MAX_INFLIGHT_PER_USER: ${TAH_MAX_INFLIGHT_PER_USER:-2}
+      TAH_MAX_INFLIGHT_SYSTEM: ${TAH_MAX_INFLIGHT_SYSTEM:-20}
+      TAH_BOOTSTRAP_ADMIN_USERNAME: ${TAH_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      TAH_BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
+      PI_DATA_DIR: /var/lib/tah/pi-sessions
+      PI_MODELS_FILE: /run/secrets/pi_models_json
+    secrets:
+      - source: pi_models_json
+        target: pi_models_json
+        mode: 0400
+      - source: bootstrap_admin_password
+        target: bootstrap_admin_password
+        mode: 0400
+    volumes: [pi_sessions:/var/lib/tah/pi-sessions]
+    depends_on:
+      core-rpc: {condition: service_healthy}
+    ports: ["8080:8080"]
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1:8080/healthz]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+volumes:
+  mysql_data: {}
+  redis_data: {}
+  pi_sessions: {}
+secrets:
+  mysql_password: {file: ./secrets/mysql_password}
+  mysql_root_password: {file: ./secrets/mysql_root_password}
+  bootstrap_admin_password: {file: ./secrets/bootstrap_admin_password}
+  pi_models_json: {file: ./secrets/pi_models.json}

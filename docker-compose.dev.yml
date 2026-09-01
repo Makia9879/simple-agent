@@ -1,0 +1,116 @@
+name: terminal-agent-hub-dev
+
+services:
+  mysql:
+    image: mysql:8.4.4
+    environment:
+      MYSQL_DATABASE: tah
+      MYSQL_USER: tah
+      MYSQL_PASSWORD: tah-dev-password
+      MYSQL_ROOT_PASSWORD: tah-dev-root-password
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    healthcheck:
+      test: [CMD-SHELL, "mysqladmin ping -h 127.0.0.1 -uroot -ptah-dev-root-password --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7.4.2-alpine
+    command: [redis-server, --appendonly, "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    image: mysql:8.4.4
+    depends_on:
+      mysql: {condition: service_healthy}
+    volumes:
+      - ./backend/rpc/ent/migrate:/migrations:ro
+    entrypoint: [sh, -ec]
+    command: ["mysql -hmysql -utah -ptah-dev-password tah < /migrations/001_hub.sql"]
+    restart: "no"
+
+  core-rpc:
+    build:
+      context: ./backend
+      dockerfile: deploy/docker-compose/Dockerfile
+    environment:
+      TAH_LISTEN_ADDR: :8081
+      TAH_COOKIE_SECURE: "false"
+      TAH_BOOTSTRAP_ADMIN_USERNAME: admin
+      TAH_BOOTSTRAP_ADMIN_PASSWORD: admin-dev-password
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      redis: {condition: service_healthy}
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1:8081/healthz]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  core-api:
+    build:
+      context: ./backend
+      dockerfile: deploy/docker-compose/Dockerfile
+    environment:
+      TAH_LISTEN_ADDR: :8080
+      TAH_COOKIE_SECURE: "false"
+      TAH_MAX_INFLIGHT_PER_USER: "2"
+      TAH_MAX_INFLIGHT_SYSTEM: "20"
+      TAH_BOOTSTRAP_ADMIN_USERNAME: admin
+      TAH_BOOTSTRAP_ADMIN_PASSWORD: admin-dev-password
+      PI_DATA_DIR: /var/lib/tah/pi-sessions
+    depends_on:
+      core-rpc: {condition: service_healthy}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/pi-sessions:/var/lib/tah/pi-sessions
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1:8080/healthz]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  session-ui:
+    image: node:22-alpine
+    working_dir: /workspace
+    environment:
+      VITE_USE_MOCK: "true"
+      VITE_API_BASE_URL: /api/v1
+    volumes:
+      - ./session-ui:/workspace
+      - session_ui_node_modules:/workspace/node_modules
+    command: [sh, -ec, "npm install && npm run dev -- --host 0.0.0.0"]
+    ports:
+      - "5173:5173"
+
+  admin-ui:
+    image: node:22-alpine
+    working_dir: /workspace
+    environment:
+      VITE_USE_MOCK: "true"
+      VITE_API_BASE_URL: /api/v1
+    volumes:
+      - ./admin-ui:/workspace
+      - admin_ui_node_modules:/workspace/node_modules
+    command: [sh, -ec, "corepack enable && pnpm install && pnpm dev --host 0.0.0.0"]
+    ports:
+      - "5174:5174"
+
+volumes:
+  session_ui_node_modules:
+  admin_ui_node_modules:

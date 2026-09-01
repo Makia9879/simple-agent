@@ -1,0 +1,78 @@
+syntax = "v1"
+
+// Terminal Agent Hub frozen browser contract. Base path: /api/v1.
+// Authentication uses HttpOnly cookies tah_access and tah_refresh; tokens are
+// never included in JSON. All /admin routes require role=admin.
+// Unified error: {"error":{"code":"MODEL_NOT_AUTHORIZED","message":"...","request_id":"req_..."}}
+// 401 UNAUTHENTICATED; 403 FORBIDDEN|MODEL_NOT_AUTHORIZED; 404 NOT_FOUND
+// (including an invisible object); 409 CONVERSATION_BUSY|NO_ACTIVE_GENERATION;
+// 429 CONCURRENCY_LIMIT|LOGIN_RATE_LIMITED; 502 PI_UNAVAILABLE|PROVIDER_ERROR;
+// 504 PROVIDER_TIMEOUT.
+
+type ErrorPayload { Code string `json:"code"`; Message string `json:"message"`; RequestID string `json:"request_id"` }
+type ErrorResponse { Error ErrorPayload `json:"error"` }
+type LoginRequest { Username string `json:"username"`; Password string `json:"password"` }
+type User { ID string `json:"id"`; Username string `json:"username"`; Role string `json:"role"`; Status string `json:"status"` }
+type LoginResponse { User User `json:"user"` }
+type Model { ID string `json:"id"`; Name string `json:"name"`; Provider string `json:"provider"`; UpstreamModelID string `json:"upstream_model_id"`; Enabled bool `json:"enabled,optional"`; Available bool `json:"available,optional"` }
+type ModelsResponse { Items []Model `json:"items"` }
+type CreateConversationRequest { ModelID string `json:"model_id"` }
+type RenameConversationRequest { Title string `json:"title"` }
+type Conversation { ID string `json:"id"`; ModelID string `json:"model_id"`; Title string `json:"title"`; Status string `json:"status"`; Hidden bool `json:"hidden,optional"` }
+type MessageRequest { Content string `json:"content"` }
+type Message { ID string `json:"id"`; Role string `json:"role"`; Content string `json:"content"`; Status string `json:"status"`; CreatedAt string `json:"created_at"` }
+type MessagesResponse { Items []Message `json:"items"`; NextSince string `json:"next_since"`; HasMore bool `json:"has_more"` }
+type Group { ID string `json:"id"`; Name string `json:"name"`; Status string `json:"status"` }
+type MembersRequest { AddUserIDs []string `json:"add_user_ids"`; RemoveUserIDs []string `json:"remove_user_ids"` }
+type Grant { SubjectType string `json:"subject_type,options=user|group"`; SubjectID string `json:"subject_id"`; ModelID string `json:"model_id"` }
+type Provider { Provider string `json:"provider"`; Name string `json:"name"`; Status string `json:"status"`; Models []Model `json:"models"`; LastSyncedAt string `json:"last_synced_at"` }
+type Usage { RequestID string `json:"request_id"`; ConversationID string `json:"conversation_id"`; UserID string `json:"user_id"`; ModelID string `json:"model_id"`; Status string `json:"status"`; InputTokens int64 `json:"input_tokens,optional"`; OutputTokens int64 `json:"output_tokens,optional"`; TotalTokens int64 `json:"total_tokens,optional"` }
+type Audit { ActorID string `json:"actor_id"`; Action string `json:"action"`; ObjectType string `json:"object_type"`; ObjectID string `json:"object_id"`; Result string `json:"result"`; TraceID string `json:"trace_id"` }
+
+@server(prefix: /api/v1)
+service hub-api {
+  @handler Login post /auth/login (LoginRequest) returns (LoginResponse)
+  @handler Refresh post /auth/refresh returns (LoginResponse)
+  @handler Logout post /auth/logout
+  @handler Me get /auth/me returns (User)
+  @handler Models get /models returns (ModelsResponse)
+  @handler CreateConversation post /conversations (CreateConversationRequest) returns (Conversation)
+  @handler ListConversations get /conversations returns ([]Conversation)
+  @handler RenameConversation patch /conversations/:id (RenameConversationRequest) returns (Conversation)
+  @handler HideConversation delete /conversations/:id
+  @handler GetMessages get /conversations/:id/messages returns (MessagesResponse)
+  // text/event-stream. Exactly four public event names are allowed:
+  // event:text_delta data:{request_id,conversation_id,delta}
+  // event:usage data:{request_id,input_tokens?,output_tokens?,total_tokens?}
+  // event:done data:{request_id,finish_reason}; or, mutually exclusively,
+  // event:error data:{request_id,code,message}. One terminal event per request.
+  @handler Prompt post /conversations/:id/messages (MessageRequest)
+  @handler Abort post /conversations/:id/abort
+  @handler MyUsage get /usage returns ([]Usage)
+
+  @handler AdminUsers get /admin/users returns ([]User)
+  @handler AdminCreateUser post /admin/users (User) returns (User)
+  @handler AdminUpdateUser patch /admin/users/:id (User) returns (User)
+  @handler AdminResetPassword post /admin/users/:id/reset-password
+  @handler AdminGroups get /admin/groups returns ([]Group)
+  @handler AdminCreateGroup post /admin/groups (Group) returns (Group)
+  @handler AdminUpdateGroup patch /admin/groups/:id (Group) returns (Group)
+  @handler AdminMembers patch /admin/groups/:id/members (MembersRequest)
+  @handler AdminProviders get /admin/providers returns ([]Provider)
+  @handler AdminProviderSync post /admin/providers/sync returns ([]Provider)
+  @handler AdminModels get /admin/models returns (ModelsResponse)
+  @handler AdminUpdateModel patch /admin/models/:id (Model) returns (Model)
+  @handler AdminGrants get /admin/grants returns ([]Grant)
+  @handler AdminCreateGrant post /admin/grants (Grant) returns (Grant)
+  @handler AdminDeleteGrant delete /admin/grants (Grant)
+  @handler AdminEffectiveModels get /admin/users/:id/effective-models returns (ModelsResponse)
+  @handler AdminUsage get /admin/usage returns ([]Usage)
+  @handler AdminConversations get /admin/conversations returns ([]Conversation)
+  @handler AdminMessages get /admin/conversations/:id/messages returns (MessagesResponse)
+  @handler AdminAudit get /admin/audit returns ([]Audit)
+}
+
+// Query contract: list usage supports from,to,model_id and admin user_id.
+// Message reads support opaque PI Entry cursor since and limit (1..100, default 50).
+// Provider responses are a strict whitelist and can never contain key/token/secret.
+// Conversation model_id and pi_session_ref cannot be updated; pi_session_ref is never public.

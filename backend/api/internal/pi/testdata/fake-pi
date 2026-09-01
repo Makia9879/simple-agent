@@ -1,0 +1,41 @@
+#!/bin/sh
+# Test-only PI RPC fixture. It deliberately writes two JSON records in one write
+# for prompt to exercise a JSONL client against sticky/combined stdout chunks.
+for arg in "$@"; do
+  [ "$arg" = "--no-tools" ] && no_tools=1
+  [ "$arg" = "--mode" ] && mode_seen=1
+done
+if [ "$no_tools" != 1 ] || [ "$mode_seen" != 1 ]; then echo '{"type":"response","success":false,"error":"rpc and tools-off required"}'; exit 0; fi
+while IFS= read -r command; do
+  case "$command" in
+    *get_available_models*)
+      printf '%s\n' '{"type":"response","command":"get_available_models","success":true,"data":{"models":[{"provider":"glm","id":"glm-4-flash","name":"GLM 4 Flash","apiKey":"must-not-leak"},{"provider":"deepseek","id":"deepseek-chat","name":"DeepSeek Chat","token":"must-not-leak"}]}}'
+      ;;
+    *get_entries*)
+      printf '%s\n' '{"type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"message","id":"e1","timestamp":"2026-09-01T00:00:00Z","message":{"role":"user","content":"hello"}},{"type":"message","id":"e2","timestamp":"2026-09-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"private"},{"type":"text","text":"visible"},{"type":"toolCall","name":"bash"}],"stopReason":"stop"}},{"type":"message","id":"e3","message":{"role":"toolResult","content":"secret"}}]}}'
+      ;;
+    *'"type":"abort"'*)
+      printf '%s\n' '{"type":"response","command":"abort","success":true}'
+      printf '%s\n' '{"type":"message_end","message":{"stopReason":"aborted"}}'
+      printf '%s\n' '{"type":"agent_settled"}'
+      exit 0
+      ;;
+    *'"type":"prompt"'*)
+      printf '%s' '{"type":"response","command":"prompt","success":true}'
+      # req-2 remains active until Abort; this proves abort sends only abort and
+      # the adapter waits for agent_settled rather than clearing a PI queue.
+      case "$command" in
+        *req-2*)
+          printf '\n'
+          IFS= read -r abort
+          printf '%s\n%s\n' '{"type":"response","command":"abort","success":true}' '{"type":"message_end","message":{"stopReason":"aborted"}}'
+          printf '%s\n' '{"type":"agent_settled"}'
+          exit 0
+          ;;
+      esac
+      printf '\n%s\n%s\n' '{"type":"message_update","usage":{"input":2,"output":1,"totalTokens":3},"assistantMessageEvent":{"type":"thinking_delta","delta":"hidden"}}' '{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"hello world"}}'
+      printf '%s\n%s\n' '{"type":"message_end","message":{"stopReason":"stop"}}' '{"type":"agent_settled"}'
+      exit 0
+      ;;
+  esac
+done

@@ -1,0 +1,23 @@
+{
+  "name": "terminal-agent-hub-session-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "lint": "npm run check"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-auto": "3.2.5",
+    "@sveltejs/kit": "2.5.18",
+    "@sveltejs/vite-plugin-svelte": "3.1.2",
+    "svelte": "4.2.18",
+    "svelte-check": "3.8.4",
+    "typescript": "5.5.4",
+    "vite": "5.3.5",
+    "vitest": "2.0.5"
+  }
+}
