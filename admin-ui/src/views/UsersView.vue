@@ -8,7 +8,11 @@ import * as usersApi from '@/api/modules/users';
 import type { AdminUser, Role, UserStatus } from '@/api/types';
 import { formatDateTime } from '@/utils/format';
 
-/** F3 / AU-02：用户列表、创建、编辑、禁用、重置密码、查看所属组与状态。 */
+/**
+ * F3 / AU-02：用户列表、创建、编辑、禁用、重置密码。
+ * 真实后端用户只有 id/username/role/status（无昵称/邮箱/创建时间），
+ * 缺失字段降级显示「—」；密码策略为至少 12 位。
+ */
 const loading = ref(false);
 const rows = ref<AdminUser[]>([]);
 const total = ref(0);
@@ -52,8 +56,6 @@ function onSearch(): void {
 interface UserFormState {
   id: string | null;
   username: string;
-  nickname: string;
-  email: string;
   role: Role;
   password: string;
 }
@@ -64,8 +66,6 @@ const modalError = ref('');
 const form = reactive<UserFormState>({
   id: null,
   username: '',
-  nickname: '',
-  email: '',
   role: 'user',
   password: '',
 });
@@ -74,27 +74,13 @@ const isEdit = computed(() => form.id !== null);
 
 function openCreate(): void {
   modalError.value = '';
-  Object.assign(form, {
-    id: null,
-    username: '',
-    nickname: '',
-    email: '',
-    role: 'user',
-    password: '',
-  });
+  Object.assign(form, { id: null, username: '', role: 'user', password: '' });
   modalVisible.value = true;
 }
 
 function openEdit(user: AdminUser): void {
   modalError.value = '';
-  Object.assign(form, {
-    id: user.id,
-    username: user.username,
-    nickname: user.nickname,
-    email: user.email,
-    role: user.role,
-    password: '',
-  });
+  Object.assign(form, { id: user.id, username: user.username, role: user.role, password: '' });
   modalVisible.value = true;
 }
 
@@ -103,21 +89,15 @@ async function submitModal(): Promise<void> {
   modalSubmitting.value = true;
   try {
     if (isEdit.value) {
-      await usersApi.updateUser(form.id!, {
-        nickname: form.nickname,
-        email: form.email,
-        role: form.role,
-      });
+      await usersApi.updateUser(form.id!, { role: form.role });
       message.success('用户已更新');
     } else {
       await usersApi.createUser({
         username: form.username,
-        nickname: form.nickname,
-        email: form.email,
+        password: form.password,
         role: form.role,
-        password: form.password || undefined,
       });
-      message.success('用户已创建，初始密码为 Init@123456（未填写时）');
+      message.success('用户已创建');
     }
     modalVisible.value = false;
     await load();
@@ -159,8 +139,8 @@ async function submitReset(): Promise<void> {
     return;
   }
   resetError.value = '';
-  if (resetForm.password.length < 8) {
-    resetError.value = '密码长度至少 8 位';
+  if (resetForm.password.length < usersApi.MIN_PASSWORD_LENGTH) {
+    resetError.value = `密码长度至少 ${usersApi.MIN_PASSWORD_LENGTH} 位`;
     return;
   }
   if (resetForm.password !== resetForm.confirm) {
@@ -192,7 +172,7 @@ onMounted(() => {
           用户管理
         </h2>
         <p class="page-subtitle">
-          创建、编辑、禁用用户并重置密码；用户可属于多个组
+          创建、编辑、禁用用户并重置密码；用户可属于多个组（在用户组页维护成员）
         </p>
       </div>
       <a-space>
@@ -217,7 +197,7 @@ onMounted(() => {
         <a-form-item label="关键词">
           <a-input-search
             v-model:value="query.query"
-            placeholder="用户名 / 昵称 / 邮箱"
+            placeholder="用户名"
             style="width: 260px"
             allow-clear
             @search="onSearch"
@@ -259,22 +239,12 @@ onMounted(() => {
         <a-table-column
           title="用户名"
           data-index="username"
-          :width="110"
-        />
-        <a-table-column
-          title="昵称"
-          data-index="nickname"
-          :width="110"
-        />
-        <a-table-column
-          title="邮箱"
-          data-index="email"
-          :width="180"
+          :width="140"
         />
         <a-table-column
           title="角色"
           data-index="role"
-          :width="90"
+          :width="110"
         >
           <template #default="{ text }">
             <a-tag :color="text === 'admin' ? 'purple' : 'blue'">
@@ -285,7 +255,7 @@ onMounted(() => {
         <a-table-column
           title="状态"
           data-index="status"
-          :width="90"
+          :width="100"
         >
           <template #default="{ text }">
             <a-tag :color="text === 'active' ? 'green' : 'red'">
@@ -298,7 +268,7 @@ onMounted(() => {
           title="所属组"
         >
           <template #default="{ record }">
-            <template v-if="record.group_names.length > 0">
+            <template v-if="record.group_names && record.group_names.length > 0">
               <a-tag
                 v-for="name in record.group_names"
                 :key="name"
@@ -309,16 +279,15 @@ onMounted(() => {
             <span
               v-else
               style="color: rgba(0, 0, 0, 0.35)"
-            >未分组</span>
+            >—</span>
           </template>
         </a-table-column>
         <a-table-column
           title="创建时间"
-          data-index="created_at"
-          :width="150"
+          :width="170"
         >
-          <template #default="{ text }">
-            {{ formatDateTime(text) }}
+          <template #default="{ record }">
+            {{ record.created_at ? formatDateTime(record.created_at) : '—' }}
           </template>
         </a-table-column>
         <a-table-column
@@ -370,24 +339,6 @@ onMounted(() => {
             placeholder="3-32 位字母、数字或下划线"
           />
         </a-form-item>
-        <a-form-item
-          label="昵称"
-          required
-        >
-          <a-input
-            v-model:value="form.nickname"
-            placeholder="不超过 32 个字符"
-          />
-        </a-form-item>
-        <a-form-item
-          label="邮箱"
-          required
-        >
-          <a-input
-            v-model:value="form.email"
-            placeholder="name@example.com"
-          />
-        </a-form-item>
         <a-form-item label="角色">
           <a-radio-group
             v-model:value="form.role"
@@ -403,11 +354,13 @@ onMounted(() => {
         </a-form-item>
         <a-form-item
           v-if="!isEdit"
-          label="初始密码（可选）"
+          label="初始密码"
+          required
+          extra="至少 12 位；密码只在创建时设置，之后可由管理员重置"
         >
           <a-input-password
             v-model:value="form.password"
-            placeholder="留空默认 Init@123456"
+            :placeholder="`至少 ${usersApi.MIN_PASSWORD_LENGTH} 位`"
           />
         </a-form-item>
       </a-form>
@@ -433,7 +386,7 @@ onMounted(() => {
         >
           <a-input-password
             v-model:value="resetForm.password"
-            placeholder="至少 8 位"
+            :placeholder="`至少 ${usersApi.MIN_PASSWORD_LENGTH} 位`"
           />
         </a-form-item>
         <a-form-item

@@ -70,6 +70,16 @@ func TestAuthCookiesAndAdminRBAC(t *testing.T) {
 		t.Fatalf("sync=%d %s", w.Code, w.Body.String())
 	}
 }
+func TestCasbinCompatibleAuthorizerSeam(t *testing.T) {
+	a := RoleAuthorizer{}
+	if a.Enforce("user", "/admin/audit", http.MethodGet) {
+		t.Fatal("user was allowed into admin policy")
+	}
+	if !a.Enforce("admin", "/admin/audit", http.MethodGet) || !a.Enforce("user", "/models", http.MethodGet) {
+		t.Fatal("role policy rejected an allowed route")
+	}
+}
+
 func TestDisabledAccessImmediatelyRejected(t *testing.T) {
 	s := logic.NewStore()
 	a := logic.NewAuth(s)

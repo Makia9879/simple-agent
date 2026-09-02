@@ -67,6 +67,21 @@ const grantSubmitting = ref(false);
 
 const grantableModels = ref<ModelSummary[]>([]);
 
+/** 展示名兜底：后端授权记录只回三项 ID，名称由前端用已加载的目录解析。 */
+function resolveSubjectLabel(grant: Grant): string {
+  if (grant.subject_name) {
+    return grant.subject_name;
+  }
+  if (grant.subject_type === 'user') {
+    return users.value.find((u) => u.id === grant.subject_id)?.username ?? grant.subject_id;
+  }
+  return groups.value.find((g) => g.id === grant.subject_id)?.name ?? grant.subject_id;
+}
+
+function resolveModelName(modelId: string): string {
+  return models.value.find((m) => m.id === modelId)?.name ?? modelId;
+}
+
 async function loadGrants(): Promise<void> {
   grantsLoading.value = true;
   try {
@@ -276,7 +291,7 @@ onMounted(() => {
                     :key="group.id"
                     :label="group.name"
                   >
-                    {{ group.name }}（{{ group.member_count }} 人）
+                    {{ group.name }}{{ group.member_count !== null ? `（${group.member_count} 人）` : '' }}
                   </a-select-option>
                 </template>
                 <template v-else>
@@ -285,7 +300,7 @@ onMounted(() => {
                     :key="user.id"
                     :label="user.username"
                   >
-                    {{ user.username }}（{{ user.nickname }}）
+                    {{ user.username }}
                   </a-select-option>
                 </template>
               </a-select>
@@ -360,21 +375,24 @@ onMounted(() => {
               title="对象"
             >
               <template #default="{ record }">
-                {{ record.subject_name }}（{{ record.subject_id }}）
+                {{ resolveSubjectLabel(record) }}（{{ record.subject_id }}）
               </template>
             </a-table-column>
             <a-table-column
+              key="model"
               title="模型"
-              data-index="model_name"
-              :width="170"
-            />
+              :width="190"
+            >
+              <template #default="{ record }">
+                {{ record.model_name ?? resolveModelName(record.model_id) }}
+              </template>
+            </a-table-column>
             <a-table-column
               title="创建时间"
-              data-index="created_at"
-              :width="160"
+              :width="170"
             >
-              <template #default="{ text }">
-                {{ formatDateTime(text) }}
+              <template #default="{ record }">
+                {{ record.created_at ? formatDateTime(record.created_at) : '—' }}
               </template>
             </a-table-column>
             <a-table-column
@@ -384,7 +402,7 @@ onMounted(() => {
             >
               <template #default="{ record }">
                 <a-popconfirm
-                  :title="`确认撤销 ${record.subject_name} 对 ${record.model_name} 的授权？`"
+                  :title="`确认撤销 ${resolveSubjectLabel(record)} 对 ${record.model_name ?? resolveModelName(record.model_id)} 的授权？`"
                   @confirm="removeGrant(record)"
                 >
                   <a style="color: #cf1322">撤销</a>
@@ -418,7 +436,7 @@ onMounted(() => {
                   :key="user.id"
                   :label="user.username"
                 >
-                  {{ user.username }}（{{ user.nickname }}）
+                  {{ user.username }}
                 </a-select-option>
               </a-select>
             </a-form-item>

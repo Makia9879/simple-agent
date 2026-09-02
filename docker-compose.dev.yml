@@ -48,6 +48,11 @@ services:
     environment:
       TAH_LISTEN_ADDR: :8081
       TAH_COOKIE_SECURE: "false"
+      TAH_MYSQL_HOST: mysql:3306
+      TAH_MYSQL_USER: tah
+      TAH_MYSQL_PASSWORD: tah-dev-password
+      TAH_MYSQL_DATABASE: tah
+      TAH_REDIS_ADDR: redis:6379
       TAH_BOOTSTRAP_ADMIN_USERNAME: admin
       TAH_BOOTSTRAP_ADMIN_PASSWORD: admin-dev-password
     depends_on:
@@ -70,15 +75,22 @@ services:
       TAH_COOKIE_SECURE: "false"
       TAH_MAX_INFLIGHT_PER_USER: "2"
       TAH_MAX_INFLIGHT_SYSTEM: "20"
+      TAH_MYSQL_HOST: mysql:3306
+      TAH_MYSQL_USER: tah
+      TAH_MYSQL_PASSWORD: tah-dev-password
+      TAH_MYSQL_DATABASE: tah
+      TAH_REDIS_ADDR: redis:6379
       TAH_BOOTSTRAP_ADMIN_USERNAME: admin
       TAH_BOOTSTRAP_ADMIN_PASSWORD: admin-dev-password
       PI_DATA_DIR: /var/lib/tah/pi-sessions
+      PI_COMMAND: /usr/local/bin/fake-pi
     depends_on:
       core-rpc: {condition: service_healthy}
     ports:
       - "8080:8080"
     volumes:
       - ./data/pi-sessions:/var/lib/tah/pi-sessions
+      - ./backend/api/internal/pi/testdata/fake-pi:/usr/local/bin/fake-pi:ro
     healthcheck:
       test: [CMD, wget, -qO-, http://127.0.0.1:8080/healthz]
       interval: 10s
@@ -89,8 +101,9 @@ services:
     image: node:22-alpine
     working_dir: /workspace
     environment:
-      VITE_USE_MOCK: "true"
-      VITE_API_BASE_URL: /api/v1
+      VITE_USE_MOCK: ${VITE_USE_MOCK:-true}
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+      VITE_PROXY_TARGET: ${VITE_PROXY_TARGET:-http://core-api:8080}
     volumes:
       - ./session-ui:/workspace
       - session_ui_node_modules:/workspace/node_modules
@@ -102,8 +115,9 @@ services:
     image: node:22-alpine
     working_dir: /workspace
     environment:
-      VITE_USE_MOCK: "true"
-      VITE_API_BASE_URL: /api/v1
+      VITE_USE_MOCK: ${VITE_USE_MOCK:-true}
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api/v1}
+      VITE_PROXY_TARGET: ${VITE_PROXY_TARGET:-http://core-api:8080}
     volumes:
       - ./admin-ui:/workspace
       - admin_ui_node_modules:/workspace/node_modules

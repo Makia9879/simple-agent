@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -13,16 +14,29 @@ import (
 	logic "terminal-agent-hub/backend/api/internal/logic/hub"
 )
 
+// Authorizer is compatible with a Casbin enforcement adapter: object is the
+// stable API path and action is the HTTP method. Production policy keeps the
+// V1 role model intentionally limited to admin/user.
+type Authorizer interface {
+	Enforce(role, object, action string) bool
+}
+type RoleAuthorizer struct{}
+
+func (RoleAuthorizer) Enforce(role, object, action string) bool {
+	return !strings.HasPrefix(object, "/admin") || role == "admin"
+}
+
 type Handler struct {
 	Store        *logic.Store
 	Auth         *logic.AuthService
 	Orchestrator *logic.Orchestrator
 	Catalog      logic.ProviderCatalog
 	Secure       bool
+	Authorizer   Authorizer
 }
 
 func New(s *logic.Store, a *logic.AuthService, o *logic.Orchestrator, catalog logic.ProviderCatalog, secure bool) http.Handler {
-	return &Handler{Store: s, Auth: a, Orchestrator: o, Catalog: catalog, Secure: secure}
+	return &Handler{Store: s, Auth: a, Orchestrator: o, Catalog: catalog, Secure: secure, Authorizer: RoleAuthorizer{}}
 }
 
 type errBody struct {
@@ -70,9 +84,18 @@ func publicMessage(code string) string {
 }
 func requestID() string { return fmt.Sprintf("req_%d", time.Now().UnixNano()) }
 func decode(r *http.Request, v any) error {
-	d := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+	// LimitReader avoids the nil ResponseWriter panic that MaxBytesReader would
+	// trigger on an oversized body while keeping request parsing bounded.
+	d := json.NewDecoder(io.LimitReader(r.Body, 1<<20+1))
 	d.DisallowUnknownFields()
-	return d.Decode(v)
+	if err := d.Decode(v); err != nil {
+		return err
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		return errors.New("invalid trailing request data")
+	}
+	return nil
 }
 func (h *Handler) cookie(w http.ResponseWriter, name, value string, maxAge int) {
 	http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: "/api/v1", HttpOnly: true, Secure: h.Secure, SameSite: http.SameSiteLaxMode, MaxAge: maxAge})
@@ -98,7 +121,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(path, "/admin") {
-		if u.Role != "admin" {
+		if h.Authorizer == nil || !h.Authorizer.Enforce(u.Role, path, r.Method) {
 			fail(w, logic.ErrForbidden)
 			return
 		}
@@ -305,7 +328,22 @@ func (h *Handler) conversation(w http.ResponseWriter, r *http.Request, u logic.U
 }
 func matchUsage(r *http.Request, u logic.Usage) bool {
 	q := r.URL.Query()
-	return q.Get("model_id") == "" || q.Get("model_id") == u.ModelID
+	if q.Get("model_id") != "" && q.Get("model_id") != u.ModelID {
+		return false
+	}
+	if raw := q.Get("from"); raw != "" {
+		from, err := time.Parse(time.RFC3339, raw)
+		if err != nil || u.StartedAt.Before(from) {
+			return false
+		}
+	}
+	if raw := q.Get("to"); raw != "" {
+		to, err := time.Parse(time.RFC3339, raw)
+		if err != nil || u.StartedAt.After(to) {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, path string) {
@@ -338,6 +376,10 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, pa
 		}
 		x := logic.User{ID: requestID(), Username: q.Username, PasswordHash: hash, Role: q.Role, Status: "active"}
 		h.Store.Users[x.ID] = x
+		if e := h.Store.Persist(); e != nil {
+			fail(w, logic.ErrPIUnavailable)
+			return
+		}
 		h.Store.AddAudit(logic.Audit{ActorID: u.ID, Action: "user.create", ObjectType: "user", ObjectID: x.ID, Result: "success", TraceID: requestID()})
 		jsonOut(w, 201, safeUser(x))
 	case strings.HasPrefix(path, "/users/") && strings.HasSuffix(path, "/reset-password") && r.Method == "POST":
@@ -361,6 +403,10 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, pa
 		}
 		x.PasswordHash = hash
 		h.Store.Users[id] = x
+		if e := h.Store.Persist(); e != nil {
+			fail(w, logic.ErrPIUnavailable)
+			return
+		}
 		jsonOut(w, 204, nil)
 	case strings.HasPrefix(path, "/users/") && r.Method == "PATCH":
 		id := strings.TrimPrefix(path, "/users/")
@@ -381,6 +427,10 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, pa
 			x.Role = q.Role
 		}
 		h.Store.Users[id] = x
+		if e := h.Store.Persist(); e != nil {
+			fail(w, logic.ErrPIUnavailable)
+			return
+		}
 		jsonOut(w, 200, safeUser(x))
 	case path == "/groups" && r.Method == "GET":
 		jsonOut(w, 200, map[string]any{"items": h.Store.Groups})
@@ -403,6 +453,10 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, pa
 			g.Status = q.Status
 		}
 		h.Store.Groups[id] = g
+		if e := h.Store.Persist(); e != nil {
+			fail(w, logic.ErrPIUnavailable)
+			return
+		}
 		jsonOut(w, 200, g)
 	case path == "/providers" && r.Method == "GET":
 		jsonOut(w, 200, map[string]any{"items": h.Store.Providers})
@@ -441,8 +495,18 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, pa
 		}
 		m.Enabled = q.Enabled
 		h.Store.Models[q.ID] = m
+		if e := h.Store.Persist(); e != nil {
+			fail(w, logic.ErrPIUnavailable)
+			return
+		}
 		h.Store.AddAudit(logic.Audit{ActorID: u.ID, Action: "model.update", ObjectType: "model", ObjectID: q.ID, Result: "success", TraceID: requestID()})
 		jsonOut(w, 200, m)
+	case path == "/grants" && r.Method == "GET":
+		items := make([]logic.Grant, 0, len(h.Store.Grants))
+		for _, g := range h.Store.Grants {
+			items = append(items, g)
+		}
+		jsonOut(w, 200, map[string]any{"items": items})
 	case path == "/grants" && r.Method == "POST":
 		var g logic.Grant
 		if decode(r, &g) != nil || h.Store.PutGrant(g) != nil {
@@ -458,6 +522,10 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, pa
 			return
 		}
 		h.Store.RemoveGrant(g)
+		if h.Store.PersistenceError() != nil {
+			fail(w, logic.ErrPIUnavailable)
+			return
+		}
 		jsonOut(w, 204, nil)
 	case path == "/groups" && r.Method == "POST":
 		var g logic.Group
@@ -472,6 +540,10 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, pa
 			g.Status = "active"
 		}
 		h.Store.Groups[g.ID] = g
+		if e := h.Store.Persist(); e != nil {
+			fail(w, logic.ErrPIUnavailable)
+			return
+		}
 		jsonOut(w, 201, g)
 	case strings.HasPrefix(path, "/groups/") && strings.HasSuffix(path, "/members") && r.Method == "PATCH":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/groups/"), "/members")
@@ -483,7 +555,15 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, pa
 			jsonOut(w, 400, nil)
 			return
 		}
+		if _, ok := h.Store.Groups[id]; !ok {
+			fail(w, logic.ErrNotFound)
+			return
+		}
 		h.Store.SetMembers(id, q.Add, q.Remove)
+		if h.Store.PersistenceError() != nil {
+			fail(w, logic.ErrPIUnavailable)
+			return
+		}
 		jsonOut(w, 200, map[string]bool{"ok": true})
 	case path == "/usage" && r.Method == "GET":
 		items := []logic.Usage{}
@@ -508,7 +588,11 @@ func (h *Handler) admin(w http.ResponseWriter, r *http.Request, u logic.User, pa
 			fail(w, logic.ErrNotFound)
 			return
 		}
-		p, e := h.Store.Review(r.Context(), u.ID, requestID(), c, h.Orchestrator.PI.Messages, r.URL.Query().Get("since"), 50)
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit < 1 || limit > 100 {
+			limit = 50
+		}
+		p, e := h.Store.Review(r.Context(), u.ID, requestID(), c, h.Orchestrator.PI.Messages, r.URL.Query().Get("since"), limit)
 		if e != nil {
 			fail(w, logic.ErrPIUnavailable)
 			return

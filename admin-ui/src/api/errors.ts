@@ -44,6 +44,23 @@ export function sanitizeErrorMessage(message: string): string {
   return out.slice(0, 200);
 }
 
+/** 真实后端少量直接输出英文校验文案（{"error":"..."} 字符串形）；展示前映射为中文。 */
+const SERVER_MESSAGE_OVERRIDES: Array<[RegExp, string]> = [
+  [/password must be at least 12 characters/i, '密码长度至少 12 位'],
+  [/username exists/i, '用户名已存在'],
+  [/invalid request/i, '请求参数不合法'],
+  [/invalid title/i, '标题不能为空且不超过 200 字符'],
+];
+
+function localizeServerMessage(message: string): string {
+  for (const [pattern, replacement] of SERVER_MESSAGE_OVERRIDES) {
+    if (pattern.test(message)) {
+      return replacement;
+    }
+  }
+  return message;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -57,9 +74,9 @@ export class ApiError extends Error {
     this.requestId = requestId;
   }
 
-  /** 供界面展示的安全文案：优先使用服务端给定文案（脱敏后），其次按错误码映射。 */
+  /** 供界面展示的安全文案：优先使用服务端给定文案（本地化 + 脱敏后），其次按错误码映射。 */
   get displayMessage(): string {
-    const fromServer = sanitizeErrorMessage(this.message).trim();
+    const fromServer = sanitizeErrorMessage(localizeServerMessage(this.message)).trim();
     if (fromServer.length > 0) {
       return fromServer;
     }

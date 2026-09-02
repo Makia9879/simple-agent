@@ -21,4 +21,14 @@ describe('session UI mock contract', () => {
   const generator=mockApi.send(conversation.id,'/limit',new AbortController().signal);
   await expect(generator.next()).rejects.toMatchObject({status:429,code:'CONCURRENCY_LIMIT'});
  });
+ it('keeps revoked histories readable but prevents another prompt', async () => {
+  const conversation=await mockApi.createConversation('m_glm_flash');
+  mockApi.setReadonly(conversation.id);
+  await expect(mockApi.messages(conversation.id)).resolves.toMatchObject({items: []});
+  const generator=mockApi.send(conversation.id,'again',new AbortController().signal);
+  await expect(generator.next()).rejects.toMatchObject({status:403,code:'MODEL_NOT_AUTHORIZED'});
+ });
+ it('rejects an ungranted model ID rather than trusting a UI selection', async () => {
+  await expect(mockApi.createConversation('m_not_granted')).rejects.toMatchObject({status:403,code:'MODEL_NOT_AUTHORIZED'});
+ });
 });

@@ -1,31 +1,31 @@
 <script lang="ts">
  import { onMount } from 'svelte';
- import { mockApi } from '$lib/mock-api';
+ import { api, USE_MOCK } from '$lib/api';
  import { safeMarkdown } from '$lib/markdown';
  import type { ApiError, Conversation, Message, Model, Usage, User } from '$lib/types';
  let currentUser:User|null=null, username='alice', password='demo', loginError='', loading=false;
  let models:Model[]=[], conversations:Conversation[]=[], current:Conversation|null=null, messages:Message[]=[], prompt='', notice='', streamController:AbortController|null=null;
  let usages:Usage[]=[], usageModel='', from='', to='', showUsage=false, renameMode=false;
  const errorMessage=(e:unknown) => { const x=e as ApiError; return x?.message || '请求未完成，请稍后重试'; };
- async function bootstrap(){ try { currentUser=await mockApi.me(); await loadChat(); } catch { currentUser=null; } }
+ async function bootstrap(){ try { currentUser=await api.me(); await loadChat(); } catch { currentUser=null; } }
  onMount(bootstrap);
- async function login(){ loading=true; loginError=''; try{ currentUser=await mockApi.login(username,password); await loadChat(); }catch(e){loginError=errorMessage(e)}finally{loading=false} }
- async function logout(){ await mockApi.logout(); currentUser=null; current=null; messages=[]; }
- async function loadChat(){ models=await mockApi.models(); conversations=await mockApi.conversations(); if(current){ const found=conversations.find(c=>c.id===current?.id); if(found) await open(found); else current=null; } }
- async function create(){ if(!models[0]) return; try{ current=await mockApi.createConversation(models[0].id); await loadChat(); messages=[]; }catch(e){notice=errorMessage(e)} }
- async function open(c:Conversation){ current=c; const response=await mockApi.messages(c.id); messages=response.items; notice=c.status==='readonly'?'该模型授权已撤销：历史只读。':''; }
- async function remove(c:Conversation){ await mockApi.remove(c.id); if(current?.id===c.id){current=null;messages=[]} await loadChat(); }
- async function rename(){ if(!current) return; current=await mockApi.rename(current.id,current.title); renameMode=false; await loadChat(); }
+ async function login(){ loading=true; loginError=''; try{ currentUser=await api.login(username,password); await loadChat(); }catch(e){loginError=errorMessage(e)}finally{loading=false} }
+ async function logout(){ await api.logout(); currentUser=null; current=null; messages=[]; }
+ async function loadChat(){ models=await api.models(); conversations=await api.conversations(); if(current){ const found=conversations.find(c=>c.id===current?.id); if(found) await open(found); else current=null; } }
+ async function create(){ if(!models[0]) return; try{ current=await api.createConversation(models[0].id); await loadChat(); messages=[]; }catch(e){notice=errorMessage(e)} }
+ async function open(c:Conversation){ current=c; const response=await api.messages(c.id); messages=response.items; notice=c.status==='readonly'?'该模型授权已撤销：历史只读。':''; }
+ async function remove(c:Conversation){ await api.remove(c.id); if(current?.id===c.id){current=null;messages=[]} await loadChat(); }
+ async function rename(){ if(!current) return; current=await api.rename(current.id,current.title); renameMode=false; await loadChat(); }
  async function send(){ if(!current || !prompt.trim() || current.status!=='active' || streamController) return; const content=prompt.trim(); prompt=''; notice=''; streamController=new AbortController(); let assistant:Message={id:'streaming',role:'assistant',content:'',status:'completed',created_at:new Date().toISOString()}; messages=[...messages,{id:`local_${Date.now()}`,role:'user',content,status:'completed',created_at:new Date().toISOString()},assistant];
- try { for await(const event of mockApi.send(current.id,content,streamController.signal)){ if(event.event==='text_delta'){ assistant={...assistant,content:assistant.content+String(event.data.delta||'')}; messages=[...messages.slice(0,-1),assistant]; } if(event.event==='error') notice=String(event.data.message); if(event.event==='done' && event.data.finish_reason==='aborted') notice='生成已中止'; } await open(current); await loadChat(); } catch(e){ messages=messages.filter(m=>m.id!==assistant.id); notice=errorMessage(e); } finally { streamController=null; }
+ try { for await(const event of api.send(current.id,content,streamController.signal)){ if(event.event==='text_delta'){ assistant={...assistant,content:assistant.content+String(event.data.delta||'')}; messages=[...messages.slice(0,-1),assistant]; } if(event.event==='error') notice=String(event.data.message); if(event.event==='done' && event.data.finish_reason==='aborted') notice='生成已中止'; } await open(current); await loadChat(); } catch(e){ if(!streamController?.signal.aborted) { messages=messages.filter(m=>m.id!==assistant.id); notice=errorMessage(e); } } finally { streamController=null; }
  }
- async function stop(){ if(current && streamController){ streamController.abort(); try{await mockApi.abort(current.id)}catch{} } }
- async function loadUsage(){ usages=await mockApi.usage(from||undefined,to||undefined,usageModel||undefined); }
+ async function stop(){ if(current && streamController){ try{await api.abort(current.id)}catch(e){notice=errorMessage(e)} finally{streamController.abort()} } }
+ async function loadUsage(){ usages=await api.usage(from||undefined,to||undefined,usageModel||undefined); }
  $: selectedModel=models.find(m=>m.id===current?.model_id);
 </script>
 
 {#if !currentUser}
- <main class="login"><section><h1>Terminal Agent Hub</h1><p>会话 UI（独立 mock 模式）</p><form on:submit|preventDefault={login}><label>用户名<input bind:value={username} autocomplete="username" /></label><label>密码<input bind:value={password} type="password" autocomplete="current-password" /></label>{#if loginError}<div class="error" role="alert">{loginError}</div>{/if}<button disabled={loading}>{loading?'登录中…':'登录'}</button></form><small>演示：alice / demo。试用 disabled、limited 或错误密码查看安全提示。</small></section></main>
+ <main class="login"><section><h1>Terminal Agent Hub</h1><p>会话 UI（{USE_MOCK ? '独立 mock 模式' : 'REST/SSE 模式'}）</p><form on:submit|preventDefault={login}><label>用户名<input bind:value={username} autocomplete="username" /></label><label>密码<input bind:value={password} type="password" autocomplete="current-password" /></label>{#if loginError}<div class="error" role="alert">{loginError}</div>{/if}<button disabled={loading}>{loading?'登录中…':'登录'}</button></form><small>演示：alice / demo。试用 disabled、limited 或错误密码查看安全提示。</small></section></main>
 {:else}
  <main class="app"><aside><header><strong>TAH</strong><button class="link" on:click={logout}>退出</button></header><button class="new" on:click={create} disabled={!models.length}>＋ 新建会话</button>{#if !models.length}<p class="empty">暂无可用模型。请联系管理员授权后重试。</p>{/if}<nav>{#each conversations as c}<div class:chosen={current?.id===c.id}><button on:click={()=>open(c)}>{c.title}<small>{c.status==='readonly'?'只读':''}</small></button><button aria-label="删除会话" class="icon" on:click={()=>remove(c)}>×</button></div>{/each}</nav><button class="usage" on:click={()=>{showUsage=!showUsage;loadUsage()}}>我的用量</button></aside>
  <section class="chat"><header class="chat-head">{#if current}<div>{#if renameMode}<input bind:value={current.title} on:keydown={(e)=>e.key==='Enter'&&rename()} /><button on:click={rename}>保存</button>{:else}<h2>{current.title}</h2><button class="link" on:click={()=>renameMode=true}>重命名</button>{/if}<span>{selectedModel?.name} · {selectedModel?.provider}</span></div>{:else}<h2>开始一个新会话</h2>{/if}<span>{currentUser.username}</span></header>

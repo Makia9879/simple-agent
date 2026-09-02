@@ -10,7 +10,6 @@ import * as usersApi from '@/api/modules/users';
 import type {
   AdminConversation,
   AdminUser,
-  ConversationStatus,
   ModelSummary,
   ReviewFeedback,
   VisibleMessage,
@@ -20,9 +19,9 @@ import { formatDateTime } from '@/utils/format';
 
 /**
  * F8 / AU-09 / AU-10 / AU-11：
- * - 全量会话（含用户已隐藏）按用户/模型/状态筛选；
+ * - 全量会话（含用户已隐藏）按用户/模型筛选；真实后端不提供会话状态与消息数，相应列降级；
  * - 正文按 since 游标 + limit 分页读取，禁止一次拉全文；
- * - 打开正文即产生审阅审计，界面显示 trace 反馈；
+ * - 打开正文即产生审阅审计；后端不回传 trace 时展示通用反馈；
  * - PI 暂不可读时明确提示，失败审阅同样入审计。
  */
 const loading = ref(false);
@@ -34,11 +33,19 @@ const models = ref<ModelSummary[]>([]);
 const query = reactive({
   user_id: '' as string,
   model_id: '' as string,
-  status: '' as '' | ConversationStatus,
   hidden: '' as '' | 'true' | 'false',
   page: 1,
   page_size: 10,
 });
+
+/** 展示名兜底：会话索引只回 owner_id / model_id。 */
+function usernameOf(userId: string): string {
+  return users.value.find((u) => u.id === userId)?.username ?? userId;
+}
+
+function modelNameOf(modelId: string): string {
+  return models.value.find((m) => m.id === modelId)?.name ?? modelId;
+}
 
 async function load(): Promise<void> {
   loading.value = true;
@@ -46,7 +53,6 @@ async function load(): Promise<void> {
     const result = await conversationsApi.listConversations({
       user_id: query.user_id || undefined,
       model_id: query.model_id || undefined,
-      status: query.status || undefined,
       hidden: query.hidden === '' ? undefined : query.hidden === 'true',
       page: query.page,
       page_size: query.page_size,
@@ -84,10 +90,11 @@ async function loadFilters(): Promise<void> {
   }
 }
 
-function statusTag(status: ConversationStatus): { color: string; text: string } {
+function statusTag(status: AdminConversation['status']): { color: string; text: string } {
   if (status === 'generating') return { color: 'processing', text: '生成中' };
   if (status === 'readonly') return { color: 'default', text: '只读' };
-  return { color: 'green', text: '活跃' };
+  if (status === 'active') return { color: 'green', text: '活跃' };
+  return { color: 'default', text: '未知' };
 }
 
 // ---- 正文审阅 ----
@@ -99,6 +106,7 @@ const hasMore = ref(false);
 const messagesLoading = ref(false);
 const messagesError = ref('');
 const review = ref<ReviewFeedback | null>(null);
+const reviewRecorded = ref(false);
 const PAGE_SIZE = 20;
 
 function openConversation(conversation: AdminConversation): void {
@@ -108,6 +116,7 @@ function openConversation(conversation: AdminConversation): void {
   hasMore.value = false;
   messagesError.value = '';
   review.value = null;
+  reviewRecorded.value = false;
   drawerVisible.value = true;
   void loadMore(true);
 }
@@ -126,8 +135,11 @@ async function loadMore(first: boolean): Promise<void> {
     messages.value = [...messages.value, ...result.items];
     nextSince.value = result.next_since;
     hasMore.value = result.has_more;
-    if (result.review.recorded) {
+    // AU-11：后端先写审阅审计再返回正文；响应带 trace 时展示，否则展示通用反馈。
+    if (result.review) {
       review.value = result.review;
+    } else {
+      reviewRecorded.value = true;
     }
   } catch (err) {
     const apiError = toApiError(err);
@@ -185,7 +197,7 @@ onMounted(() => {
               :key="user.id"
               :label="user.username"
             >
-              {{ user.username }}（{{ user.nickname }}）
+              {{ user.username }}
             </a-select-option>
           </a-select>
         </a-form-item>
@@ -202,26 +214,6 @@ onMounted(() => {
               :label="model.name"
             >
               {{ model.name }}（{{ model.provider }}）
-            </a-select-option>
-          </a-select>
-        </a-form-item>
-        <a-form-item label="状态">
-          <a-select
-            v-model:value="query.status"
-            style="width: 110px"
-            @change="onSearch"
-          >
-            <a-select-option value="">
-              全部
-            </a-select-option>
-            <a-select-option value="active">
-              活跃
-            </a-select-option>
-            <a-select-option value="generating">
-              生成中
-            </a-select-option>
-            <a-select-option value="readonly">
-              只读
             </a-select-option>
           </a-select>
         </a-form-item>
@@ -277,23 +269,31 @@ onMounted(() => {
           :width="170"
         />
         <a-table-column
+          key="owner"
           title="用户"
-          data-index="owner_username"
-          :width="100"
-        />
+          :width="120"
+        >
+          <template #default="{ record }">
+            {{ record.owner_username ?? usernameOf(record.owner_id) }}
+          </template>
+        </a-table-column>
         <a-table-column
+          key="model"
           title="模型"
-          data-index="model_name"
-          :width="160"
-        />
+          :width="170"
+        >
+          <template #default="{ record }">
+            {{ record.model_name ?? modelNameOf(record.model_id) }}
+          </template>
+        </a-table-column>
         <a-table-column
+          key="status"
           title="状态"
-          data-index="status"
           :width="100"
         >
-          <template #default="{ text }">
-            <a-tag :color="statusTag(text).color">
-              {{ statusTag(text).text }}
+          <template #default="{ record }">
+            <a-tag :color="statusTag(record.status).color">
+              {{ statusTag(record.status).text }}
             </a-tag>
           </template>
         </a-table-column>
@@ -316,17 +316,21 @@ onMounted(() => {
           </template>
         </a-table-column>
         <a-table-column
+          key="message_count"
           title="消息数"
-          data-index="message_count"
           :width="90"
-        />
-        <a-table-column
-          title="最近更新"
-          data-index="updated_at"
-          :width="150"
         >
-          <template #default="{ text }">
-            {{ formatDateTime(text) }}
+          <template #default="{ record }">
+            {{ record.message_count ?? '—' }}
+          </template>
+        </a-table-column>
+        <a-table-column
+          key="updated"
+          title="最近更新"
+          :width="170"
+        >
+          <template #default="{ record }">
+            {{ record.updated_at ?? record.created_at ? formatDateTime(record.updated_at ?? record.created_at!) : '—' }}
           </template>
         </a-table-column>
         <a-table-column
@@ -357,10 +361,10 @@ onMounted(() => {
             {{ drawerConversation.id }}
           </a-descriptions-item>
           <a-descriptions-item label="用户">
-            {{ drawerConversation.owner_username }}
+            {{ drawerConversation.owner_username ?? usernameOf(drawerConversation.owner_id) }}
           </a-descriptions-item>
           <a-descriptions-item label="模型">
-            {{ drawerConversation.model_name }}
+            {{ drawerConversation.model_name ?? modelNameOf(drawerConversation.model_id) }}
           </a-descriptions-item>
           <a-descriptions-item label="状态">
             <a-tag :color="statusTag(drawerConversation.status).color">
@@ -374,10 +378,10 @@ onMounted(() => {
             </a-tag>
           </a-descriptions-item>
           <a-descriptions-item label="创建时间">
-            {{ formatDateTime(drawerConversation.created_at) }}
+            {{ drawerConversation.created_at ? formatDateTime(drawerConversation.created_at) : '—' }}
           </a-descriptions-item>
           <a-descriptions-item label="最近更新">
-            {{ formatDateTime(drawerConversation.updated_at) }}
+            {{ drawerConversation.updated_at ? formatDateTime(drawerConversation.updated_at) : '—' }}
           </a-descriptions-item>
         </a-descriptions>
 
@@ -387,6 +391,13 @@ onMounted(() => {
           show-icon
           style="margin-bottom: 16px"
           :message="`已记录本次审阅（trace ID：${review.trace_id}）。可在“审计日志”中查看该记录。`"
+        />
+        <a-alert
+          v-else-if="reviewRecorded"
+          type="success"
+          show-icon
+          style="margin-bottom: 16px"
+          message="已记录本次审阅。可在“审计日志”页查看对应记录。"
         />
         <a-alert
           v-if="messagesError"

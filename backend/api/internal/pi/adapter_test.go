@@ -1,6 +1,7 @@
 package pi
 
 import (
+	"bufio"
 	"context"
 	"os"
 	"path/filepath"
@@ -62,6 +63,51 @@ func TestPromptUsesStrictJSONLFiltersThinkingAndSettles(t *testing.T) {
 	}
 	if err := a.Abort(context.Background(), "session_123"); err == nil {
 		t.Fatal("settled process remained active")
+	}
+}
+
+func TestPromptUsesExplicitSessionForCreateAndResume(t *testing.T) {
+	a := fakeAdapter(t)
+	argsFile := filepath.Join(t.TempDir(), "pi-args")
+	t.Setenv("FAKE_PI_ARGS_FILE", argsFile)
+	for i := 0; i < 2; i++ {
+		events, err := a.Prompt(context.Background(), "resume_123", "glm/glm-4-flash", "resume", "hello")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for range events {
+		}
+		args, err := os.ReadFile(argsFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path, err := a.SessionPath("resume_123")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := string(args)
+		for _, want := range []string{"--mode\nrpc", "--no-tools", "--session-dir", a.config.DataDir, "--session", path, "--model", "glm/glm-4-flash"} {
+			if !strings.Contains(got, want) {
+				t.Fatalf("PI args missing %q: %q", want, got)
+			}
+		}
+	}
+}
+
+func TestReadLFRecordRejectsUnterminatedAndOversizedRecords(t *testing.T) {
+	if _, err := readLFRecord(bufio.NewReader(strings.NewReader(`{"type":"x"}`))); err != ErrPIProtocol {
+		t.Fatalf("unterminated record error=%v", err)
+	}
+	overlong := strings.Repeat("x", maxJSONLRecord) + "\n"
+	if _, err := readLFRecord(bufio.NewReader(strings.NewReader(overlong))); err != ErrPIProtocol {
+		t.Fatalf("oversized record error=%v", err)
+	}
+	if _, err := readLFRecord(bufio.NewReader(strings.NewReader(`{"type":"x"} {}` + "\n"))); err != nil {
+		t.Fatalf("framing should not parse JSON: %v", err)
+	}
+	var raw map[string]any
+	if err := decodeRecord([]byte(`{"type":"x"} {}`), &raw); err != ErrPIProtocol {
+		t.Fatalf("multiple JSON values error=%v", err)
 	}
 }
 

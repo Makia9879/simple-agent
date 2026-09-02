@@ -66,6 +66,8 @@ export interface SeedConversation {
   id: string;
   owner_id: string;
   model_id: string;
+  /** 镜像真实后端：索引行携带不透明的 PI 会话引用；前端归一层丢弃，永不展示。 */
+  pi_session_ref: string;
   title: string;
   hidden: boolean;
   generating: boolean;
@@ -78,7 +80,7 @@ export interface SeedUsage {
   conversation_id: string;
   user_id: string;
   model_id: string;
-  status: 'success' | 'error' | 'aborted';
+  status: 'completed' | 'failed' | 'aborted';
   started_at: string;
   ended_at: string;
   input_tokens: number | null;
@@ -255,6 +257,7 @@ export const SEED_CONVERSATIONS: SeedConversation[] = [
     id: 'c_1',
     owner_id: 'u_alice',
     model_id: 'm_glm4flash',
+    pi_session_ref: 'session_m_glm4flash',
     title: 'GLM 使用咨询',
     hidden: false,
     generating: false,
@@ -265,6 +268,7 @@ export const SEED_CONVERSATIONS: SeedConversation[] = [
     id: 'c_2',
     owner_id: 'u_carol',
     model_id: 'm_dschat',
+    pi_session_ref: 'session_m_dschat',
     title: 'DeepSeek 接口测试',
     hidden: false,
     generating: false,
@@ -275,6 +279,7 @@ export const SEED_CONVERSATIONS: SeedConversation[] = [
     id: 'c_3',
     owner_id: 'u_alice',
     model_id: 'm_dsreasoner',
+    pi_session_ref: 'session_m_dsreasoner',
     title: '推理模型体验',
     hidden: false,
     generating: false,
@@ -285,6 +290,7 @@ export const SEED_CONVERSATIONS: SeedConversation[] = [
     id: 'c_4',
     owner_id: 'u_dave',
     model_id: 'm_glm4flash',
+    pi_session_ref: 'session_m_glm4flash',
     title: '已删除的临时会话',
     hidden: true,
     generating: false,
@@ -295,6 +301,7 @@ export const SEED_CONVERSATIONS: SeedConversation[] = [
     id: 'c_5',
     owner_id: 'u_carol',
     model_id: 'm_dschat',
+    pi_session_ref: 'session_m_dschat',
     title: 'PI 故障演示会话',
     hidden: false,
     generating: false,
@@ -305,6 +312,7 @@ export const SEED_CONVERSATIONS: SeedConversation[] = [
     id: 'c_6',
     owner_id: 'u_dave',
     model_id: 'm_dschat',
+    pi_session_ref: 'session_m_dschat',
     title: '进行中的长任务',
     hidden: false,
     generating: true,
@@ -419,27 +427,28 @@ export const SEED_SESSIONS: Record<string, SessionEntry[]> = {
 };
 
 export const SEED_USAGE: SeedUsage[] = [
-  { request_id: 'req_001', conversation_id: 'c_1', user_id: 'u_alice', model_id: 'm_glm4flash', status: 'success', started_at: '2026-08-30T10:00:00Z', ended_at: '2026-08-30T10:00:05Z', input_tokens: 12, output_tokens: 45, total_tokens: 57 },
-  { request_id: 'req_002', conversation_id: 'c_1', user_id: 'u_alice', model_id: 'm_glm4flash', status: 'success', started_at: '2026-08-30T10:05:00Z', ended_at: '2026-08-30T10:05:07Z', input_tokens: 20, output_tokens: 128, total_tokens: 148 },
-  { request_id: 'req_003', conversation_id: 'c_2', user_id: 'u_carol', model_id: 'm_dschat', status: 'success', started_at: '2026-08-30T14:00:00Z', ended_at: '2026-08-30T14:00:04Z', input_tokens: null, output_tokens: null, total_tokens: null },
-  { request_id: 'req_004', conversation_id: 'c_4', user_id: 'u_dave', model_id: 'm_glm4flash', status: 'error', started_at: '2026-08-30T16:00:00Z', ended_at: '2026-08-30T16:00:02Z', input_tokens: 8, output_tokens: null, total_tokens: null },
-  { request_id: 'req_005', conversation_id: 'c_3', user_id: 'u_alice', model_id: 'm_dsreasoner', status: 'success', started_at: '2026-08-31T09:00:00Z', ended_at: '2026-08-31T09:00:12Z', input_tokens: 100, output_tokens: 560, total_tokens: 660 },
+  { request_id: 'req_001', conversation_id: 'c_1', user_id: 'u_alice', model_id: 'm_glm4flash', status: 'completed', started_at: '2026-08-30T10:00:00Z', ended_at: '2026-08-30T10:00:05Z', input_tokens: 12, output_tokens: 45, total_tokens: 57 },
+  { request_id: 'req_002', conversation_id: 'c_1', user_id: 'u_alice', model_id: 'm_glm4flash', status: 'completed', started_at: '2026-08-30T10:05:00Z', ended_at: '2026-08-30T10:05:07Z', input_tokens: 20, output_tokens: 128, total_tokens: 148 },
+  { request_id: 'req_003', conversation_id: 'c_2', user_id: 'u_carol', model_id: 'm_dschat', status: 'completed', started_at: '2026-08-30T14:00:00Z', ended_at: '2026-08-30T14:00:04Z', input_tokens: null, output_tokens: null, total_tokens: null },
+  { request_id: 'req_004', conversation_id: 'c_4', user_id: 'u_dave', model_id: 'm_glm4flash', status: 'failed', started_at: '2026-08-30T16:00:00Z', ended_at: '2026-08-30T16:00:02Z', input_tokens: 8, output_tokens: null, total_tokens: null },
+  { request_id: 'req_005', conversation_id: 'c_3', user_id: 'u_alice', model_id: 'm_dsreasoner', status: 'completed', started_at: '2026-08-31T09:00:00Z', ended_at: '2026-08-31T09:00:12Z', input_tokens: 100, output_tokens: 560, total_tokens: 660 },
   { request_id: 'req_006', conversation_id: 'c_2', user_id: 'u_carol', model_id: 'm_dschat', status: 'aborted', started_at: '2026-08-31T11:00:00Z', ended_at: '2026-08-31T11:00:06Z', input_tokens: 15, output_tokens: null, total_tokens: null },
-  { request_id: 'req_007', conversation_id: 'c_1', user_id: 'u_alice', model_id: 'm_glm4flash', status: 'success', started_at: '2026-09-01T09:00:00Z', ended_at: '2026-09-01T09:00:08Z', input_tokens: 30, output_tokens: 210, total_tokens: 240 },
-  { request_id: 'req_008', conversation_id: 'c_5', user_id: 'u_dave', model_id: 'm_dschat', status: 'error', started_at: '2026-09-01T09:10:00Z', ended_at: '2026-09-01T09:10:01Z', input_tokens: null, output_tokens: null, total_tokens: null },
-  { request_id: 'req_009', conversation_id: 'c_5', user_id: 'u_carol', model_id: 'm_dschat', status: 'success', started_at: '2026-09-01T09:20:00Z', ended_at: '2026-09-01T09:20:05Z', input_tokens: 22, output_tokens: 95, total_tokens: 117 },
-  { request_id: 'req_010', conversation_id: 'c_6', user_id: 'u_dave', model_id: 'm_dschat', status: 'success', started_at: '2026-09-01T09:30:00Z', ended_at: '2026-09-01T09:30:09Z', input_tokens: 40, output_tokens: 300, total_tokens: 340 },
-  { request_id: 'req_011', conversation_id: 'c_1', user_id: 'u_alice', model_id: 'm_glm4flash', status: 'success', started_at: '2026-09-01T09:40:00Z', ended_at: '2026-09-01T09:40:06Z', input_tokens: 18, output_tokens: 76, total_tokens: 94 },
-  { request_id: 'req_012', conversation_id: 'c_2', user_id: 'u_carol', model_id: 'm_dschat', status: 'success', started_at: '2026-09-01T10:00:00Z', ended_at: '2026-09-01T10:00:07Z', input_tokens: 25, output_tokens: 140, total_tokens: 165 },
-  { request_id: 'req_013', conversation_id: 'c_6', user_id: 'u_dave', model_id: 'm_dschat', status: 'error', started_at: '2026-09-01T10:05:00Z', ended_at: '2026-09-01T10:05:02Z', input_tokens: 50, output_tokens: null, total_tokens: null },
-  { request_id: 'req_014', conversation_id: 'c_3', user_id: 'u_alice', model_id: 'm_dsreasoner', status: 'success', started_at: '2026-09-01T10:10:00Z', ended_at: '2026-09-01T10:10:15Z', input_tokens: 120, output_tokens: 640, total_tokens: 760 },
+  { request_id: 'req_007', conversation_id: 'c_1', user_id: 'u_alice', model_id: 'm_glm4flash', status: 'completed', started_at: '2026-09-01T09:00:00Z', ended_at: '2026-09-01T09:00:08Z', input_tokens: 30, output_tokens: 210, total_tokens: 240 },
+  { request_id: 'req_008', conversation_id: 'c_5', user_id: 'u_dave', model_id: 'm_dschat', status: 'failed', started_at: '2026-09-01T09:10:00Z', ended_at: '2026-09-01T09:10:01Z', input_tokens: null, output_tokens: null, total_tokens: null },
+  { request_id: 'req_009', conversation_id: 'c_5', user_id: 'u_carol', model_id: 'm_dschat', status: 'completed', started_at: '2026-09-01T09:20:00Z', ended_at: '2026-09-01T09:20:05Z', input_tokens: 22, output_tokens: 95, total_tokens: 117 },
+  { request_id: 'req_010', conversation_id: 'c_6', user_id: 'u_dave', model_id: 'm_dschat', status: 'completed', started_at: '2026-09-01T09:30:00Z', ended_at: '2026-09-01T09:30:09Z', input_tokens: 40, output_tokens: 300, total_tokens: 340 },
+  { request_id: 'req_011', conversation_id: 'c_1', user_id: 'u_alice', model_id: 'm_glm4flash', status: 'completed', started_at: '2026-09-01T09:40:00Z', ended_at: '2026-09-01T09:40:06Z', input_tokens: 18, output_tokens: 76, total_tokens: 94 },
+  { request_id: 'req_012', conversation_id: 'c_2', user_id: 'u_carol', model_id: 'm_dschat', status: 'completed', started_at: '2026-09-01T10:00:00Z', ended_at: '2026-09-01T10:00:07Z', input_tokens: 25, output_tokens: 140, total_tokens: 165 },
+  { request_id: 'req_013', conversation_id: 'c_6', user_id: 'u_dave', model_id: 'm_dschat', status: 'failed', started_at: '2026-09-01T10:05:00Z', ended_at: '2026-09-01T10:05:02Z', input_tokens: 50, output_tokens: null, total_tokens: null },
+  { request_id: 'req_014', conversation_id: 'c_3', user_id: 'u_alice', model_id: 'm_dsreasoner', status: 'completed', started_at: '2026-09-01T10:10:00Z', ended_at: '2026-09-01T10:10:15Z', input_tokens: 120, output_tokens: 640, total_tokens: 760 },
 ];
 
+/** 镜像真实后端审计动作（小写点分）：user.create / provider.sync / model.update / grant.create / conversation.review。 */
 export const SEED_AUDIT: SeedAudit[] = [
-  { id: 'audit_001', actor_id: 'u_admin', actor_username: 'admin', action: 'LOGIN', object_type: 'auth', object_id: 'u_admin', result: 'success', detail: '管理员登录成功', trace_id: 'tr_seed_001', created_at: '2026-08-31T08:00:00Z' },
-  { id: 'audit_002', actor_id: 'u_admin', actor_username: 'admin', action: 'USER_CREATE', object_type: 'user', object_id: 'u_alice', result: 'success', detail: '创建用户 alice', trace_id: 'tr_seed_002', created_at: '2026-08-29T09:00:00Z' },
-  { id: 'audit_003', actor_id: 'u_admin', actor_username: 'admin', action: 'GROUP_CREATE', object_type: 'group', object_id: 'g_eng', result: 'success', detail: '创建用户组 研发组', trace_id: 'tr_seed_003', created_at: '2026-08-29T10:00:00Z' },
-  { id: 'audit_004', actor_id: 'u_admin', actor_username: 'admin', action: 'MODEL_ENABLE', object_type: 'model', object_id: 'm_glm4flash', result: 'success', detail: '启用模型 GLM-4-Flash', trace_id: 'tr_seed_004', created_at: '2026-08-29T10:05:00Z' },
-  { id: 'audit_005', actor_id: 'u_admin', actor_username: 'admin', action: 'GRANT_CREATE', object_type: 'grant', object_id: 'g_eng/m_glm4flash', result: 'success', detail: '用户组 研发组 授权模型 GLM-4-Flash', trace_id: 'tr_seed_005', created_at: '2026-08-29T10:10:00Z' },
-  { id: 'audit_006', actor_id: '', actor_username: 'bob', action: 'LOGIN_FAILED', object_type: 'auth', object_id: 'u_bob', result: 'failed', detail: '登录失败：账号已禁用', trace_id: 'tr_seed_006', created_at: '2026-08-31T15:01:00Z' },
+  { id: 'audit_001', actor_id: 'u_admin', actor_username: 'admin', action: 'user.create', object_type: 'user', object_id: 'u_alice', result: 'success', detail: '', trace_id: 'tr_seed_001', created_at: '2026-08-29T09:00:00Z' },
+  { id: 'audit_002', actor_id: 'u_admin', actor_username: 'admin', action: 'provider.sync', object_type: 'provider', object_id: '', result: 'success', detail: '', trace_id: 'tr_seed_002', created_at: '2026-08-29T09:30:00Z' },
+  { id: 'audit_003', actor_id: 'u_admin', actor_username: 'admin', action: 'model.update', object_type: 'model', object_id: 'm_glm4flash', result: 'success', detail: '', trace_id: 'tr_seed_003', created_at: '2026-08-29T10:05:00Z' },
+  { id: 'audit_004', actor_id: 'u_admin', actor_username: 'admin', action: 'grant.create', object_type: 'model', object_id: 'm_glm4flash', result: 'success', detail: '', trace_id: 'tr_seed_004', created_at: '2026-08-29T10:10:00Z' },
+  { id: 'audit_005', actor_id: 'u_admin', actor_username: 'admin', action: 'provider.sync', object_type: 'provider', object_id: '', result: 'failed', detail: '', trace_id: 'tr_seed_005', created_at: '2026-08-30T15:00:00Z' },
+  { id: 'audit_006', actor_id: 'u_admin', actor_username: 'admin', action: 'conversation.review', object_type: 'conversation', object_id: 'c_1', result: 'success', detail: '', trace_id: 'tr_seed_006', created_at: '2026-08-31T15:01:00Z' },
 ];

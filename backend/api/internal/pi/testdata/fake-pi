@@ -1,6 +1,9 @@
 #!/bin/sh
 # Test-only PI RPC fixture. It deliberately writes two JSON records in one write
 # for prompt to exercise a JSONL client against sticky/combined stdout chunks.
+if [ -n "${FAKE_PI_ARGS_FILE:-}" ]; then
+  printf '%s\n' "$@" > "$FAKE_PI_ARGS_FILE"
+fi
 for arg in "$@"; do
   [ "$arg" = "--no-tools" ] && no_tools=1
   [ "$arg" = "--mode" ] && mode_seen=1

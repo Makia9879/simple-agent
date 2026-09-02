@@ -91,15 +91,24 @@ async function loadFilters(): Promise<void> {
 }
 
 function statusColor(status: UsageRecord['status']): string {
-  if (status === 'success') return 'green';
-  if (status === 'error') return 'red';
+  if (status === 'completed' || status === 'success') return 'green';
+  if (status === 'failed' || status === 'error') return 'red';
   return 'orange';
 }
 
 function statusText(status: UsageRecord['status']): string {
-  if (status === 'success') return '成功';
-  if (status === 'error') return '失败';
+  if (status === 'completed' || status === 'success') return '成功';
+  if (status === 'failed' || status === 'error') return '失败';
   return '已中止';
+}
+
+/** 展示名兜底：后端用量记录只回 user_id / model_id。 */
+function usernameOf(userId: string): string {
+  return users.value.find((u) => u.id === userId)?.username ?? userId;
+}
+
+function modelNameOf(modelId: string): string {
+  return models.value.find((m) => m.id === modelId)?.name ?? modelId;
 }
 
 function duration(record: UsageRecord): string {
@@ -153,7 +162,7 @@ onMounted(() => {
               :key="user.id"
               :label="user.username"
             >
-              {{ user.username }}（{{ user.nickname }}）
+              {{ user.username }}
             </a-select-option>
           </a-select>
         </a-form-item>
@@ -266,15 +275,23 @@ onMounted(() => {
           :width="110"
         />
         <a-table-column
+          key="user"
           title="用户"
-          data-index="username"
-          :width="100"
-        />
+          :width="110"
+        >
+          <template #default="{ record }">
+            {{ record.username ?? usernameOf(record.user_id) }}
+          </template>
+        </a-table-column>
         <a-table-column
+          key="model"
           title="模型"
-          data-index="model_name"
-          :width="160"
-        />
+          :width="170"
+        >
+          <template #default="{ record }">
+            {{ record.model_name ?? modelNameOf(record.model_id) }}
+          </template>
+        </a-table-column>
         <a-table-column
           title="会话"
           data-index="conversation_id"

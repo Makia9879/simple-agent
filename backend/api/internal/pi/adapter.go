@@ -131,7 +131,7 @@ func (a *Adapter) Prompt(ctx context.Context, ref, model, requestID, message str
 	a.mu.Lock()
 	if _, exists := a.active[ref]; exists {
 		a.mu.Unlock()
-		_ = p.cmd.Process.Kill()
+		a.finish("", p) // reap the rejected process; Kill alone leaves a zombie.
 		return nil, errors.New("PI session already active")
 	}
 	a.active[ref] = p
@@ -173,7 +173,8 @@ func (a *Adapter) finish(ref string, p *process) {
 	}
 	a.mu.Unlock()
 	_ = p.stdin.Close()
-	if p.cmd.Process != nil {
+	_ = p.stdout.Close()
+	if p.cmd.Process != nil && p.cmd.ProcessState == nil {
 		_ = p.cmd.Process.Kill()
 	}
 	p.waitOnce.Do(func() { _ = p.cmd.Wait() })
@@ -199,7 +200,7 @@ func (a *Adapter) stream(ref string, p *process, out chan<- logic.PIEvent) {
 			continue
 		}
 		var raw map[string]any
-		if json.Unmarshal(line, &raw) != nil {
+		if decodeRecord(line, &raw) != nil {
 			out <- logic.PIEvent{Type: "error", Code: "PI_PROTOCOL", Message: "PI returned invalid protocol data"}
 			return
 		}

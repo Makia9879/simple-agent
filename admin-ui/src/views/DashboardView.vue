@@ -10,9 +10,12 @@ import * as modelsApi from '@/api/modules/providers';
 import * as usageApi from '@/api/modules/usage';
 import * as usersApi from '@/api/modules/users';
 import type { AuditEntry, ModelSummary } from '@/api/types';
+import { USE_MOCK } from '@/config';
 import { formatDateTime } from '@/utils/format';
 
-/** 仪表盘：全部数据来自契约接口，页面加载即命中 mock（F0 健康页）。 */
+/** 仪表盘：全部数据来自契约接口（F0 健康页）；后端无分页字段，总数由客户端计算。
+ * 数据来源随 USE_MOCK 开关动态标注（mock 契约接口 / Core API），真实模式联调时不误标为 mock。 */
+const dataSourceLabel = USE_MOCK ? 'mock 契约接口' : 'Core API';
 const loading = ref(false);
 const loadError = ref('');
 const stats = ref({
@@ -26,6 +29,10 @@ const stats = ref({
 });
 const recentAudit = ref<AuditEntry[]>([]);
 const auditLoading = ref(false);
+
+function actorLabel(entry: AuditEntry): string {
+  return entry.actor_username ?? entry.actor_id;
+}
 
 async function load(): Promise<void> {
   loading.value = true;
@@ -84,7 +91,7 @@ onMounted(() => {
           仪表盘
         </h2>
         <p class="page-subtitle">
-          Terminal Agent Hub 管理总览（数据来自 mock 契约接口）
+          Terminal Agent Hub 管理总览（数据来自 {{ dataSourceLabel }}）
         </p>
       </div>
       <a-button
@@ -155,18 +162,21 @@ onMounted(() => {
         >
           <a-table-column
             title="时间"
-            data-index="created_at"
-            :width="160"
+            :width="170"
           >
-            <template #default="{ text }">
-              {{ formatDateTime(text) }}
+            <template #default="{ record }">
+              {{ record.created_at ? formatDateTime(record.created_at) : '—' }}
             </template>
           </a-table-column>
           <a-table-column
+            key="actor"
             title="操作者"
-            data-index="actor_username"
-            :width="100"
-          />
+            :width="140"
+          >
+            <template #default="{ record }">
+              {{ actorLabel(record) }}
+            </template>
+          </a-table-column>
           <a-table-column
             title="动作"
             data-index="action"
@@ -178,7 +188,9 @@ onMounted(() => {
             :width="200"
           >
             <template #default="{ record }">
-              {{ record.object_type }} / {{ record.object_id }}
+              {{ record.object_type }}<template v-if="record.object_id">
+                / {{ record.object_id }}
+              </template>
             </template>
           </a-table-column>
           <a-table-column

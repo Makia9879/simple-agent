@@ -70,8 +70,29 @@ type Page struct {
 	HasMore   bool
 }
 
+// Snapshot is the persistence boundary between Hub domain logic and the MySQL
+// adapter. Runtime-only access/refresh tokens are intentionally absent.
+type Snapshot struct {
+	Users         []User
+	Groups        []Group
+	Members       map[string][]string
+	Providers     []Provider
+	Models        []Model
+	Grants        []Grant
+	Conversations []Conversation
+	Usages        []Usage
+	Audits        []Audit
+}
+
+type Persistence interface {
+	Load(context.Context) (Snapshot, error)
+	Save(context.Context, Snapshot) error
+}
+
 type Store struct {
 	mu            sync.RWMutex
+	persistence   Persistence
+	persistErr    error
 	Users         map[string]User
 	Groups        map[string]Group
 	Members       map[string]map[string]bool
@@ -92,6 +113,99 @@ type tokenRecord struct {
 func NewStore() *Store {
 	return &Store{Users: map[string]User{}, Groups: map[string]Group{}, Members: map[string]map[string]bool{}, Providers: map[string]Provider{}, Models: map[string]Model{}, Grants: map[string]Grant{}, Conversations: map[string]Conversation{}, Usages: map[string]Usage{}, refresh: map[string]tokenRecord{}, access: map[string]tokenRecord{}}
 }
+
+// AttachPersistence loads the durable state before the HTTP server starts.
+// There is deliberately no fallback to an empty store when MySQL is configured:
+// silently doing so would make a restart appear to have deleted organization data.
+func (s *Store) AttachPersistence(ctx context.Context, p Persistence) error {
+	snap, err := p.Load(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.persistence = p
+	s.Users = map[string]User{}
+	for _, v := range snap.Users {
+		s.Users[v.ID] = v
+	}
+	s.Groups = map[string]Group{}
+	for _, v := range snap.Groups {
+		s.Groups[v.ID] = v
+	}
+	s.Members = map[string]map[string]bool{}
+	for g, users := range snap.Members {
+		s.Members[g] = map[string]bool{}
+		for _, u := range users {
+			s.Members[g][u] = true
+		}
+	}
+	s.Providers = map[string]Provider{}
+	for _, v := range snap.Providers {
+		s.Providers[v.Provider] = v
+	}
+	s.Models = map[string]Model{}
+	for _, v := range snap.Models {
+		s.Models[v.ID] = v
+	}
+	s.Grants = map[string]Grant{}
+	for _, v := range snap.Grants {
+		s.Grants[grantKey(v)] = v
+	}
+	s.Conversations = map[string]Conversation{}
+	for _, v := range snap.Conversations {
+		s.Conversations[v.ID] = v
+	}
+	s.Usages = map[string]Usage{}
+	for _, v := range snap.Usages {
+		s.Usages[v.RequestID] = v
+	}
+	s.Audits = append([]Audit(nil), snap.Audits...)
+	return nil
+}
+func (s *Store) snapshotLocked() Snapshot {
+	x := Snapshot{Members: map[string][]string{}}
+	for _, v := range s.Users {
+		x.Users = append(x.Users, v)
+	}
+	for _, v := range s.Groups {
+		x.Groups = append(x.Groups, v)
+	}
+	for g, users := range s.Members {
+		for u := range users {
+			x.Members[g] = append(x.Members[g], u)
+		}
+	}
+	for _, v := range s.Providers {
+		x.Providers = append(x.Providers, v)
+	}
+	for _, v := range s.Models {
+		x.Models = append(x.Models, v)
+	}
+	for _, v := range s.Grants {
+		x.Grants = append(x.Grants, v)
+	}
+	for _, v := range s.Conversations {
+		x.Conversations = append(x.Conversations, v)
+	}
+	for _, v := range s.Usages {
+		x.Usages = append(x.Usages, v)
+	}
+	x.Audits = append(x.Audits, s.Audits...)
+	return x
+}
+func (s *Store) persistLocked() {
+	if s.persistence != nil {
+		s.persistErr = s.persistence.Save(context.Background(), s.snapshotLocked())
+	}
+}
+func (s *Store) Persist() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.persistLocked()
+	return s.persistErr
+}
+func (s *Store) PersistenceError() error { s.mu.RLock(); defer s.mu.RUnlock(); return s.persistErr }
 func randomID(prefix string) string {
 	b := make([]byte, 18)
 	_, _ = rand.Read(b)
@@ -135,6 +249,7 @@ type AuthService struct {
 	Store        *Store
 	Clock        Clock
 	SecureCookie bool
+	Tokens       TokenStore
 	mu           sync.Mutex
 	attempts     map[string]*attempt
 }
@@ -148,7 +263,12 @@ type Session struct {
 }
 
 func NewAuth(s *Store) *AuthService {
-	return &AuthService{Store: s, Clock: realClock{}, attempts: map[string]*attempt{}}
+	return &AuthService{Store: s, Clock: realClock{}, Tokens: newMemoryTokenStore(), attempts: map[string]*attempt{}}
+}
+func (a *AuthService) SetTokenStore(tokens TokenStore) {
+	if tokens != nil {
+		a.Tokens = tokens
+	}
 }
 func (a *AuthService) BootstrapAdmin(username, password string) (User, error) {
 	a.Store.mu.Lock()
@@ -164,7 +284,8 @@ func (a *AuthService) BootstrapAdmin(username, password string) (User, error) {
 	}
 	u := User{ID: randomID("u_"), Username: username, PasswordHash: h, Role: "admin", Status: "active"}
 	a.Store.Users[u.ID] = u
-	return u, nil
+	a.Store.persistLocked()
+	return u, a.Store.persistErr
 }
 func (a *AuthService) Login(username, password, source string) (Session, error) {
 	key := strings.ToLower(username) + "|" + source
@@ -192,8 +313,14 @@ func (a *AuthService) Login(username, password, source string) (Session, error) 
 	if found.Status != "active" {
 		return Session{}, ErrForbidden
 	}
+	a.mu.Lock()
 	delete(a.attempts, key)
-	return a.issueLocked(found), nil
+	a.mu.Unlock()
+	session := a.issueLocked(found)
+	if session.Access == "" {
+		return Session{}, ErrPIUnavailable
+	}
+	return session, nil
 }
 func (a *AuthService) fail(key string, now time.Time) {
 	a.mu.Lock()
@@ -211,41 +338,47 @@ func (a *AuthService) fail(key string, now time.Time) {
 func (a *AuthService) issueLocked(u User) Session {
 	access := randomID("a_")
 	refresh := randomID("r_")
-	now := a.Clock.Now()
-	a.Store.refresh[refresh] = tokenRecord{UserID: u.ID, ExpiresAt: now.Add(7 * 24 * time.Hour)}
-	a.Store.access[access] = tokenRecord{UserID: u.ID, ExpiresAt: now.Add(15 * time.Minute)}
+	if a.Tokens.Put(context.Background(), "access:"+access, u.ID, 15*time.Minute) != nil {
+		return Session{}
+	}
+	if a.Tokens.Put(context.Background(), "refresh:"+refresh, u.ID, 7*24*time.Hour) != nil {
+		_ = a.Tokens.Delete(context.Background(), "access:"+access)
+		return Session{}
+	}
 	return Session{Access: access, Refresh: refresh, User: u}
 }
 func (a *AuthService) Refresh(token string) (Session, error) {
-	a.Store.mu.Lock()
-	defer a.Store.mu.Unlock()
-	rec, ok := a.Store.refresh[token]
-	if !ok || !a.Clock.Now().Before(rec.ExpiresAt) {
-		delete(a.Store.refresh, token)
+	userID, ok, err := a.Tokens.Take(context.Background(), "refresh:"+token)
+	if err != nil || !ok {
 		return Session{}, ErrUnauthenticated
 	}
-	delete(a.Store.refresh, token)
-	u, ok := a.Store.Users[rec.UserID]
-	if !ok || u.Status != "active" {
+	a.Store.mu.RLock()
+	u, exists := a.Store.Users[userID]
+	a.Store.mu.RUnlock()
+	if !exists || u.Status != "active" {
 		return Session{}, ErrUnauthenticated
 	}
-	return a.issueLocked(u), nil
+	s := a.issueLocked(u)
+	if s.Access == "" {
+		return Session{}, ErrUnauthenticated
+	}
+	return s, nil
 }
 func (a *AuthService) Me(token string) (User, error) {
+	userID, ok, err := a.Tokens.Get(context.Background(), "access:"+token)
+	if err != nil || !ok {
+		return User{}, ErrUnauthenticated
+	}
 	a.Store.mu.RLock()
-	defer a.Store.mu.RUnlock()
-	rec, ok := a.Store.access[token]
-	u, exists := a.Store.Users[rec.UserID]
-	if !ok || !a.Clock.Now().Before(rec.ExpiresAt) || !exists || u.Status != "active" {
+	u, exists := a.Store.Users[userID]
+	a.Store.mu.RUnlock()
+	if !exists || u.Status != "active" {
 		return User{}, ErrUnauthenticated
 	}
 	return u, nil
 }
 func (a *AuthService) Logout(access, refresh string) {
-	a.Store.mu.Lock()
-	defer a.Store.mu.Unlock()
-	delete(a.Store.refresh, refresh)
-	delete(a.Store.access, access)
+	_ = a.Tokens.Delete(context.Background(), "access:"+access, "refresh:"+refresh)
 }
 
 func grantKey(g Grant) string { return g.SubjectType + "|" + g.SubjectID + "|" + g.ModelID }
@@ -256,9 +389,15 @@ func (s *Store) PutGrant(g Grant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Grants[grantKey(g)] = g
-	return nil
+	s.persistLocked()
+	return s.persistErr
 }
-func (s *Store) RemoveGrant(g Grant) { s.mu.Lock(); defer s.mu.Unlock(); delete(s.Grants, grantKey(g)) }
+func (s *Store) RemoveGrant(g Grant) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.Grants, grantKey(g))
+	s.persistLocked()
+}
 func (s *Store) SetMembers(group string, add, remove []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -271,6 +410,7 @@ func (s *Store) SetMembers(group string, add, remove []string) {
 	for _, u := range remove {
 		delete(s.Members[group], u)
 	}
+	s.persistLocked()
 }
 
 // EffectiveModels is the sole authorization calculation used by listing and prompts.
@@ -358,7 +498,8 @@ func (s *Store) SyncProviders(ctx context.Context, c ProviderCatalog, now time.T
 			s.Models[id] = m
 		}
 	}
-	return nil
+	s.persistLocked()
+	return s.persistErr
 }
 
 func (s *Store) CreateConversation(owner, model, title string, now time.Time) (Conversation, error) {
@@ -371,8 +512,10 @@ func (s *Store) CreateConversation(owner, model, title string, now time.Time) (C
 	c := Conversation{ID: randomID("c_"), OwnerID: owner, ModelID: model, SessionRef: randomID("session_"), Title: title, CreatedAt: now, UpdatedAt: now}
 	s.mu.Lock()
 	s.Conversations[c.ID] = c
+	s.persistLocked()
+	err := s.persistErr
 	s.mu.Unlock()
-	return c, nil
+	return c, err
 }
 func (s *Store) ConversationForUser(id, user string, includeHidden bool) (Conversation, error) {
 	s.mu.RLock()
@@ -393,7 +536,8 @@ func (s *Store) HideConversation(id, user string) error {
 	c.Hidden = true
 	c.UpdatedAt = time.Now().UTC()
 	s.Conversations[id] = c
-	return nil
+	s.persistLocked()
+	return s.persistErr
 }
 func (s *Store) RenameConversation(id, user, title string) error {
 	title = strings.TrimSpace(title)
@@ -409,7 +553,8 @@ func (s *Store) RenameConversation(id, user, title string) error {
 	c.Title = title
 	c.UpdatedAt = time.Now().UTC()
 	s.Conversations[id] = c
-	return nil
+	s.persistLocked()
+	return s.persistErr
 }
 func (s *Store) RecordUsage(u Usage) bool {
 	s.mu.Lock()
@@ -418,13 +563,15 @@ func (s *Store) RecordUsage(u Usage) bool {
 		return false
 	}
 	s.Usages[u.RequestID] = u
-	return true
+	s.persistLocked()
+	return s.persistErr == nil
 }
 func (s *Store) AddAudit(a Audit) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	a.CreatedAt = time.Now().UTC()
 	s.Audits = append(s.Audits, a)
+	s.persistLocked()
 }
 
 var sensitive = regexp.MustCompile(`(?i)(api[_-]?key|authorization|token|secret)\s*[:=]\s*[^\s,;]+`)

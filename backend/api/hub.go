@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	handler "terminal-agent-hub/backend/api/internal/handler/hub"
@@ -26,6 +27,17 @@ func (unavailablePI) Messages(context.Context, string, string, int) (logic.Page,
 func (unavailablePI) ListProviders(context.Context) ([]logic.ProviderSnapshot, error) {
 	return nil, logic.ErrPIUnavailable
 }
+func secretEnv(key string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	if file := os.Getenv(key + "_FILE"); file != "" {
+		if b, err := os.ReadFile(file); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+	}
+	return ""
+}
 func envInt(k string, d int) int {
 	v, e := strconv.Atoi(os.Getenv(k))
 	if e != nil || v < 1 {
@@ -35,7 +47,33 @@ func envInt(k string, d int) int {
 }
 func main() {
 	s := logic.NewStore()
+	var mysqlRepo *logic.MySQLRepository
+	dsn := secretEnv("TAH_MYSQL_DSN")
+	if dsn == "" && os.Getenv("TAH_MYSQL_HOST") != "" {
+		dsn = logic.MySQLDSN(os.Getenv("TAH_MYSQL_USER"), secretEnv("TAH_MYSQL_PASSWORD"), os.Getenv("TAH_MYSQL_HOST"), os.Getenv("TAH_MYSQL_DATABASE"))
+	}
+	if dsn != "" {
+		var err error
+		mysqlRepo, err = logic.OpenMySQL(dsn)
+		if err != nil {
+			log.Fatalf("mysql: %v", err)
+		}
+		defer mysqlRepo.Close()
+		if err = s.AttachPersistence(context.Background(), mysqlRepo); err != nil {
+			log.Fatalf("load mysql state: %v", err)
+		}
+	}
 	auth := logic.NewAuth(s)
+	var redisRuntime *logic.RedisRuntime
+	if addr := os.Getenv("TAH_REDIS_ADDR"); addr != "" {
+		var err error
+		redisRuntime, err = logic.OpenRedis(addr, secretEnv("TAH_REDIS_PASSWORD"), logic.RedisDB(os.Getenv("TAH_REDIS_DB")))
+		if err != nil {
+			log.Fatalf("redis: %v", err)
+		}
+		defer redisRuntime.Close()
+		auth.SetTokenStore(redisRuntime)
+	}
 	user := os.Getenv("TAH_BOOTSTRAP_ADMIN_USERNAME")
 	pass := os.Getenv("TAH_BOOTSTRAP_ADMIN_PASSWORD")
 	if file := os.Getenv("TAH_BOOTSTRAP_ADMIN_PASSWORD_FILE"); pass == "" && file != "" {
@@ -62,6 +100,9 @@ func main() {
 		}
 	}
 	orch := logic.NewOrchestrator(s, piClient)
+	if redisRuntime != nil {
+		orch.SetRuntime(redisRuntime)
+	}
 	orch.MaxPerUser = envInt("TAH_MAX_INFLIGHT_PER_USER", 2)
 	orch.MaxSystem = envInt("TAH_MAX_INFLIGHT_SYSTEM", 20)
 	orch.DisconnectGrace = 120 * time.Second

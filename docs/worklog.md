@@ -21,6 +21,9 @@
 - session-ui Docker 容器已启动并可返回 HTTP 200；admin-ui 容器仍在首次依赖安装，core-api/core-rpc 镜像构建因网络下载超时尚未完成。
 - 调试方法、组件复用、挂载路径和常用命令已补充到 `docs/deployment.md`。
 - 本次文档与 Compose 更新已提交并推送：`214c733 chore: document docker development workflow`。
+- Agent 收口后，后端与两个前端的测试、类型检查、构建、Go vet/race 全部通过；Docker Compose 已执行 `down` 后重新 `up -d --build`，MySQL/Redis/迁移/core-rpc/core-api/session-ui/admin-ui 全部启动，健康检查通过。
+- 使用 Docker 内 fake PI fixture 验证了 Core API 登录、Provider 同步、模型授权、REST/SSE 生成、凭据字段不泄漏、refresh token 重放拒绝、普通用户访问 admin 403，以及 core-api 重启后的 MySQL 状态恢复。
+- 需要注意：完整 Simple Admin/go-zero zRPC/Ent/Casbin 框架仍未引入；当前是兼容接口和持久化适配层，core-rpc 仍复用 Hub API 二进制，这是 V1 发布前必须明确的架构残余风险。
 
 - 新增 `docker-compose.dev.yml`，将开发所需 MySQL、Redis、迁移、core-api、core-rpc、session-ui 和 admin-ui 统一容器化。
 - 新增项目根目录 `data/`，用于本地开发的 MySQL、Redis、PI Session 数据挂载：

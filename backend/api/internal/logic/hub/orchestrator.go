@@ -32,26 +32,30 @@ type Orchestrator struct {
 	DisconnectGrace       time.Duration
 	mu                    sync.Mutex
 	active                map[string]*generation
-	perUser               map[string]int
+	Runtime               GenerationRuntime
 }
 
 func NewOrchestrator(s *Store, pi PI) *Orchestrator {
-	return &Orchestrator{Store: s, PI: pi, MaxPerUser: 2, MaxSystem: 20, DisconnectGrace: 120 * time.Second, active: map[string]*generation{}, perUser: map[string]int{}}
+	return &Orchestrator{Store: s, PI: pi, MaxPerUser: 2, MaxSystem: 20, DisconnectGrace: 120 * time.Second, active: map[string]*generation{}, Runtime: newMemoryGenerationRuntime()}
+}
+func (o *Orchestrator) SetRuntime(runtime GenerationRuntime) {
+	if runtime != nil {
+		o.Runtime = runtime
+	}
 }
 func (o *Orchestrator) acquire(c Conversation, user string) (*generation, error) {
+	if err := o.Runtime.Acquire(context.Background(), c.ID, user, o.MaxPerUser, o.MaxSystem, o.DisconnectGrace+5*time.Minute); err != nil {
+		return nil, err
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if _, ok := o.active[c.ID]; ok {
+		_ = o.Runtime.Release(context.Background(), c.ID, user)
 		return nil, ErrConversationBusy
 	}
-	if len(o.active) >= o.MaxSystem || o.perUser[user] >= o.MaxPerUser {
-		return nil, ErrConcurrencyLimit
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	_ = ctx
+	_, cancel := context.WithCancel(context.Background())
 	g := &generation{requestID: randomID("req_"), userID: user, sessionRef: c.SessionRef, cancel: cancel, settled: make(chan struct{})}
 	o.active[c.ID] = g
-	o.perUser[user]++
 	return g, nil
 }
 func (o *Orchestrator) release(id string) {
@@ -62,15 +66,13 @@ func (o *Orchestrator) release(id string) {
 		return
 	}
 	delete(o.active, id)
-	o.perUser[g.userID]--
+	_ = o.Runtime.Release(context.Background(), id, g.userID)
 	g.cancel()
 	close(g.settled)
 }
 func (o *Orchestrator) IsGenerating(id string) bool {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	_, ok := o.active[id]
-	return ok
+	ok, err := o.Runtime.Exists(context.Background(), id)
+	return err == nil && ok
 }
 
 // Prompt starts a server-owned generation. Client cancellation only starts the

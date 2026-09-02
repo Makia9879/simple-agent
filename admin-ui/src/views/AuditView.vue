@@ -5,45 +5,32 @@ import { onMounted, reactive, ref } from 'vue';
 
 import { toApiError } from '@/api/errors';
 import * as conversationsApi from '@/api/modules/conversations';
-import type { AuditAction, AuditEntry } from '@/api/types';
+import type { AuditEntry } from '@/api/types';
 import { formatDateTime } from '@/utils/format';
 
-/** F8 / AU-12：操作与审阅审计列表。 */
+/** F8 / AU-12：操作与审阅审计列表。真实后端动作为小写点分值（user.create 等）。 */
 const loading = ref(false);
 const rows = ref<AuditEntry[]>([]);
 const total = ref(0);
 const query = reactive({
-  action: '' as '' | AuditAction,
+  action: '' as string,
   page: 1,
   page_size: 10,
 });
 
-const ACTION_OPTIONS: Array<{ value: AuditAction; label: string }> = [
-  { value: 'LOGIN', label: '登录' },
-  { value: 'LOGIN_FAILED', label: '登录失败' },
-  { value: 'LOGOUT', label: '退出' },
-  { value: 'USER_CREATE', label: '创建用户' },
-  { value: 'USER_UPDATE', label: '更新用户' },
-  { value: 'USER_DISABLE', label: '禁用用户' },
-  { value: 'USER_ENABLE', label: '启用用户' },
-  { value: 'USER_RESET_PASSWORD', label: '重置密码' },
-  { value: 'GROUP_CREATE', label: '创建用户组' },
-  { value: 'GROUP_UPDATE', label: '更新用户组' },
-  { value: 'GROUP_MEMBERS_CHANGE', label: '调整组成员' },
-  { value: 'PROVIDER_SYNC_SUCCESS', label: 'Provider 同步成功' },
-  { value: 'PROVIDER_SYNC_FAILURE', label: 'Provider 同步失败' },
-  { value: 'MODEL_ENABLE', label: '启用模型' },
-  { value: 'MODEL_DISABLE', label: '停用模型' },
-  { value: 'GRANT_CREATE', label: '新增授权' },
-  { value: 'GRANT_DELETE', label: '撤销授权' },
-  { value: 'CONVERSATION_REVIEW', label: '会话审阅' },
+const ACTION_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'user.create', label: '创建用户' },
+  { value: 'provider.sync', label: 'Provider 同步' },
+  { value: 'model.update', label: '模型启停' },
+  { value: 'grant.create', label: '新增授权' },
+  { value: 'conversation.review', label: '会话审阅' },
 ];
 
 function actionColor(action: string): string {
-  if (action === 'CONVERSATION_REVIEW') return 'geekblue';
-  if (action === 'LOGIN_FAILED' || action === 'PROVIDER_SYNC_FAILURE') return 'red';
-  if (action.startsWith('GRANT_')) return 'cyan';
-  if (action.startsWith('MODEL_')) return 'purple';
+  if (action === 'conversation.review') return 'geekblue';
+  if (action.startsWith('grant')) return 'cyan';
+  if (action.startsWith('model')) return 'purple';
+  if (action.startsWith('provider')) return 'gold';
   return 'blue';
 }
 
@@ -141,29 +128,23 @@ onMounted(() => {
       >
         <a-table-column
           title="时间"
-          data-index="created_at"
-          :width="150"
+          :width="170"
         >
-          <template #default="{ text }">
-            {{ formatDateTime(text) }}
+          <template #default="{ record }">
+            {{ record.created_at ? formatDateTime(record.created_at) : '—' }}
           </template>
         </a-table-column>
         <a-table-column
+          key="actor"
           title="操作者"
-          data-index="actor_username"
-          :width="110"
+          :width="160"
         >
-          <template #default="{ text }">
-            <span v-if="text">{{ text }}</span>
-            <span
-              v-else
-              style="color: rgba(0, 0, 0, 0.35)"
-            >（未登录）</span>
+          <template #default="{ record }">
+            {{ record.actor_username ?? record.actor_id }}
           </template>
         </a-table-column>
         <a-table-column
           title="动作"
-          data-index="action"
           :width="150"
         >
           <template #default="{ text }">
@@ -175,10 +156,12 @@ onMounted(() => {
         <a-table-column
           key="object"
           title="对象"
-          :width="200"
+          :width="220"
         >
           <template #default="{ record }">
-            {{ record.object_type }} / {{ record.object_id }}
+            {{ record.object_type }}<template v-if="record.object_id">
+              / {{ record.object_id }}
+            </template>
           </template>
         </a-table-column>
         <a-table-column
@@ -193,13 +176,17 @@ onMounted(() => {
           </template>
         </a-table-column>
         <a-table-column
+          key="detail"
           title="详情"
-          data-index="detail"
-        />
+        >
+          <template #default="{ record }">
+            {{ record.detail ?? '—' }}
+          </template>
+        </a-table-column>
         <a-table-column
           title="Trace ID"
           data-index="trace_id"
-          :width="120"
+          :width="180"
         />
       </a-table>
     </a-card>

@@ -16,7 +16,7 @@
 - 有专用 Dockerfile 的组件使用自己的 Dockerfile 构建；没有专用镜像的组件直接使用已有镜像（例如 `node:22-alpine`、`mysql:8.4`、`redis:7.4.2-alpine`）。
 - 源码通过 bind mount 挂载到容器，容器内执行测试、lint、build 或 dev server；依赖目录使用 Docker named volume，避免污染宿主机。
 - 统一组件由项目根目录 `docker-compose.dev.yml` 提供：MySQL、Redis、迁移、core-api、core-rpc、session-ui 和 admin-ui。
-- 开发 Compose 只使用本地开发配置和 mock，不使用真实 Provider、真实凭据或外网模型调用。
+- 开发 Compose 只使用本地开发配置和 fake PI fixture，不使用真实 Provider、真实凭据或外网模型调用；Core API/RPC 连接同一套 MySQL 和 Redis。
 
 启动开发环境：
 
@@ -26,6 +26,13 @@ mkdir -p data/mysql data/redis data/pi-sessions
 chmod 700 data data/mysql data/redis data/pi-sessions
 docker compose -f docker-compose.dev.yml config
 docker compose -f docker-compose.dev.yml up -d
+```
+
+默认前端使用 mock。需要在 Docker 内验证真实 Core API 时，使用同一套 Compose 网络和 Vite 代理：
+
+```bash
+VITE_USE_MOCK=false docker compose -f docker-compose.dev.yml up -d session-ui admin-ui
+# 浏览器访问 http://localhost:5173 和 http://localhost:5174
 ```
 
 只启动所有 Agent 共用的基础组件：
@@ -128,7 +135,7 @@ TAH_BOOTSTRAP_ADMIN_PASSWORD_FILE=/etc/tah/bootstrap_admin_password \
 | `TAH_BOOTSTRAP_ADMIN_PASSWORD_FILE` | 首个管理员密码文件路径，优先于明文变量 |
 | `PI_COMMAND` | PI 可执行文件，默认 `pi` |
 | `PI_DATA_DIR` | PI Session 持久化目录 |
-| `PI_MODELS_FILE` | PI 受保护 models 配置路径；不由浏览器/API 管理 |
+| `PI_CODING_AGENT_DIR` | PI 受保护配置目录；镜像读取其中的 `models.json`，不由浏览器/API 管理 |
 | `VITE_USE_MOCK` | 前端是否启用 mock，开发默认 true，真实后端必须 false |
 | `VITE_API_BASE_URL` | 前端唯一 API 基址 |
 

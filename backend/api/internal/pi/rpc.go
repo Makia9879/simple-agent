@@ -10,6 +10,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	logic "terminal-agent-hub/backend/api/internal/logic/hub"
@@ -20,21 +21,45 @@ const maxJSONLRecord = 1 << 20
 // readLFRecord recognizes LF only. CR is tolerated only immediately before LF,
 // as documented by PI; U+2028/U+2029 are regular bytes in JSON strings.
 func readLFRecord(r *bufio.Reader) ([]byte, error) {
-	line, err := r.ReadBytes('\n')
-	if len(line) > maxJSONLRecord {
-		return nil, ErrPIProtocol
-	}
-	if err != nil {
-		if err == io.EOF && len(line) > 0 {
-			return nil, ErrPIProtocol // strict JSONL does not accept an unterminated record
+	// ReadBytes would retain an arbitrarily large malicious record before the
+	// size check. ReadSlice bounds retained input to maxJSONLRecord instead.
+	var line []byte
+	for {
+		fragment, err := r.ReadSlice('\n')
+		if len(line)+len(fragment) > maxJSONLRecord {
+			return nil, ErrPIProtocol
 		}
-		return nil, err
+		line = append(line, fragment...)
+		if err == bufio.ErrBufferFull {
+			continue
+		}
+		if err != nil {
+			if err == io.EOF && len(line) > 0 {
+				return nil, ErrPIProtocol // strict JSONL requires a trailing LF
+			}
+			return nil, err
+		}
+		break
 	}
 	line = line[:len(line)-1]
 	if len(line) > 0 && line[len(line)-1] == '\r' {
 		line = line[:len(line)-1]
 	}
 	return line, nil
+}
+
+func decodeRecord(line []byte, target *map[string]any) error {
+	decoder := json.NewDecoder(strings.NewReader(string(line)))
+	decoder.UseNumber()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	// A JSONL record must contain exactly one JSON object, not an object followed
+	// by a second value hidden on the same line.
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return ErrPIProtocol
+	}
+	return nil
 }
 
 func number(v any) *int64 {
@@ -81,7 +106,7 @@ func (a *Adapter) request(ctx context.Context, ref string, noSession bool, comma
 			continue
 		}
 		var response map[string]any
-		if json.Unmarshal(line, &response) != nil {
+		if err := decodeRecord(line, &response); err != nil {
 			return nil, ErrPIProtocol
 		}
 		if response["type"] != "response" {

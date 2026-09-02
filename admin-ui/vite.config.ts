@@ -1,6 +1,7 @@
 import { fileURLToPath, URL } from 'node:url';
 
 import vue from '@vitejs/plugin-vue';
+import { loadEnv } from 'vite';
 import { defineConfig } from 'vitest/config';
 
 const securityHeaders = {
@@ -13,30 +14,59 @@ const securityHeaders = {
   'Referrer-Policy': 'no-referrer',
 };
 
-export default defineConfig({
-  plugins: [vue()],
-  resolve: {
-    alias: {
-      '@': fileURLToPath(new URL('./src', import.meta.url)),
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), '');
+  const useMock = env.VITE_USE_MOCK !== 'false';
+  const proxyTarget = env.VITE_PROXY_TARGET || 'http://localhost:8080';
+
+  return {
+    plugins: [vue()],
+    resolve: {
+      alias: {
+        '@': fileURLToPath(new URL('./src', import.meta.url)),
+      },
     },
-  },
-  server: {
-    port: 5174,
-    strictPort: false,
-    headers: securityHeaders,
-  },
-  preview: {
-    port: 5175,
-    strictPort: false,
-    headers: securityHeaders,
-  },
-  build: {
-    sourcemap: false,
-    chunkSizeWarningLimit: 1800,
-  },
-  test: {
-    environment: 'happy-dom',
-    include: ['src/**/*.test.ts'],
-    restoreMocks: true,
-  },
+    server: {
+      port: 5174,
+      strictPort: false,
+      headers: securityHeaders,
+      // 真实后端（VITE_USE_MOCK=false）：Core API 无 CORS 头、Cookie 固定在 /api/v1 路径，
+      // 开发态必须同源 —— 由 Vite 把 /api 代理到 VITE_PROXY_TARGET（默认 localhost:8080）。
+      // mock 模式不配置代理，请求由 MSW Service Worker 拦截。
+      ...(useMock
+        ? {}
+        : {
+            proxy: {
+              '/api': {
+                target: proxyTarget,
+                changeOrigin: false,
+              },
+            },
+          }),
+    },
+    preview: {
+      port: 5175,
+      strictPort: false,
+      headers: securityHeaders,
+      ...(useMock
+        ? {}
+        : {
+            proxy: {
+              '/api': {
+                target: proxyTarget,
+                changeOrigin: false,
+              },
+            },
+          }),
+    },
+    build: {
+      sourcemap: false,
+      chunkSizeWarningLimit: 1800,
+    },
+    test: {
+      environment: 'happy-dom',
+      include: ['src/**/*.test.ts'],
+      restoreMocks: true,
+    },
+  };
 });

@@ -9,7 +9,11 @@ import * as usersApi from '@/api/modules/users';
 import type { AdminGroup, AdminUser, GroupStatus } from '@/api/types';
 import { formatDateTime } from '@/utils/format';
 
-/** F3 / AU-03：用户组 CRUD 与成员批量加入 / 移除（一个用户可属于多个组）。 */
+/**
+ * F3 / AU-03：用户组 CRUD 与成员批量加入 / 移除（一个用户可属于多个组）。
+ * 真实后端没有「读取组成员」接口：member_ids 为 null 时成员区降级为
+ * 「勾选加入 / 勾选移除」两个全量用户表，变更仍是一次 PATCH 请求。
+ */
 const loading = ref(false);
 const rows = ref<AdminGroup[]>([]);
 const total = ref(0);
@@ -41,7 +45,7 @@ async function load(): Promise<void> {
 
 async function loadUsers(): Promise<void> {
   try {
-    const result = await usersApi.listUsers({ page: 1, page_size: 100 });
+    const result = await usersApi.listUsers({ page: 1, page_size: 200 });
     allUsers.value = result.items;
   } catch (err) {
     message.error(toApiError(err).displayMessage);
@@ -63,18 +67,18 @@ function onSearch(): void {
 const modalVisible = ref(false);
 const modalSubmitting = ref(false);
 const modalError = ref('');
-const form = reactive({ id: '' as string, name: '', description: '' });
+const form = reactive({ id: '' as string, name: '' });
 const isEdit = computed(() => form.id !== '');
 
 function openCreate(): void {
   modalError.value = '';
-  Object.assign(form, { id: '', name: '', description: '' });
+  Object.assign(form, { id: '', name: '' });
   modalVisible.value = true;
 }
 
 function openEdit(group: AdminGroup): void {
   modalError.value = '';
-  Object.assign(form, { id: group.id, name: group.name, description: group.description });
+  Object.assign(form, { id: group.id, name: group.name });
   modalVisible.value = true;
 }
 
@@ -87,10 +91,10 @@ async function submitModal(): Promise<void> {
   modalSubmitting.value = true;
   try {
     if (isEdit.value) {
-      await groupsApi.updateGroup(form.id, { name: form.name, description: form.description });
+      await groupsApi.updateGroup(form.id, { name: form.name });
       message.success('用户组已更新');
     } else {
-      await groupsApi.createGroup({ name: form.name, description: form.description });
+      await groupsApi.createGroup({ name: form.name });
       message.success('用户组已创建');
     }
     modalVisible.value = false;
@@ -121,11 +125,25 @@ const currentGroup = ref<AdminGroup | null>(null);
 const addSelected = ref<string[]>([]);
 const removeSelected = ref<string[]>([]);
 
-const candidateUsers = computed(() => {
+/** 后端能提供成员列表时（契约完整形态）才区分「当前成员 / 待加入」。 */
+const membersKnown = computed(() => currentGroup.value?.member_ids != null);
+
+const currentMembers = computed<AdminUser[]>(() => {
+  if (!currentGroup.value || currentGroup.value.member_ids == null) {
+    return [];
+  }
+  const ids = new Set(currentGroup.value.member_ids);
+  return allUsers.value.filter((u) => ids.has(u.id));
+});
+
+const candidateUsers = computed<AdminUser[]>(() => {
   if (!currentGroup.value) {
     return [] as AdminUser[];
   }
-  return allUsers.value.filter((u) => !currentGroup.value!.member_ids.includes(u.id));
+  if (currentGroup.value.member_ids == null) {
+    return allUsers.value;
+  }
+  return allUsers.value.filter((u) => !currentGroup.value!.member_ids!.includes(u.id));
 });
 
 function openMembers(group: AdminGroup): void {
@@ -147,11 +165,11 @@ async function submitMembers(): Promise<void> {
   }
   membersSubmitting.value = true;
   try {
-    const updated = await groupsApi.changeMembers(currentGroup.value.id, {
+    await groupsApi.changeMembers(currentGroup.value.id, {
       add_user_ids: addSelected.value,
       remove_user_ids: removeSelected.value,
     });
-    message.success(`成员已更新：当前 ${updated.member_count} 人`);
+    message.success(`成员变更已提交：加入 ${addSelected.value.length} 人，移除 ${removeSelected.value.length} 人`);
     membersVisible.value = false;
     await load();
   } catch (err) {
@@ -162,7 +180,7 @@ async function submitMembers(): Promise<void> {
 }
 
 function userLabel(user: AdminUser): string {
-  return `${user.username}（${user.nickname}${user.status === 'disabled' ? '，已禁用' : ''}）`;
+  return `${user.username}${user.status === 'disabled' ? '（已禁用）' : ''}`;
 }
 
 onMounted(() => {
@@ -204,7 +222,7 @@ onMounted(() => {
         <a-form-item label="关键词">
           <a-input-search
             v-model:value="query.query"
-            placeholder="组名 / 描述"
+            placeholder="组名"
             style="width: 240px"
             allow-clear
             @search="onSearch"
@@ -246,16 +264,12 @@ onMounted(() => {
         <a-table-column
           title="组名"
           data-index="name"
-          :width="140"
-        />
-        <a-table-column
-          title="描述"
-          data-index="description"
+          :width="180"
         />
         <a-table-column
           title="状态"
           data-index="status"
-          :width="90"
+          :width="100"
         >
           <template #default="{ text }">
             <a-tag :color="text === 'active' ? 'green' : 'red'">
@@ -264,17 +278,20 @@ onMounted(() => {
           </template>
         </a-table-column>
         <a-table-column
+          key="member_count"
           title="成员数"
-          data-index="member_count"
-          :width="90"
-        />
+          :width="100"
+        >
+          <template #default="{ record }">
+            {{ record.member_count ?? '—' }}
+          </template>
+        </a-table-column>
         <a-table-column
           title="创建时间"
-          data-index="created_at"
-          :width="150"
+          :width="170"
         >
-          <template #default="{ text }">
-            {{ formatDateTime(text) }}
+          <template #default="{ record }">
+            {{ record.created_at ? formatDateTime(record.created_at) : '—' }}
           </template>
         </a-table-column>
         <a-table-column
@@ -325,13 +342,6 @@ onMounted(() => {
             placeholder="不超过 32 个字符"
           />
         </a-form-item>
-        <a-form-item label="描述">
-          <a-textarea
-            v-model:value="form.description"
-            :rows="2"
-            placeholder="组的用途说明"
-          />
-        </a-form-item>
       </a-form>
     </a-modal>
 
@@ -347,46 +357,52 @@ onMounted(() => {
         show-icon
         style="margin-bottom: 12px"
       />
-      <p class="section-title">
-        当前成员（勾选移除）
-      </p>
-      <a-table
-        v-if="currentGroup"
-        :data-source="allUsers.filter((u) => currentGroup?.member_ids.includes(u.id))"
-        :pagination="false"
-        row-key="id"
-        size="small"
-        :row-selection="{
-          selectedRowKeys: removeSelected,
-          onChange: (keys: string[]) => (removeSelected = keys),
-        }"
-        :locale="{ emptyText: '该组暂无成员' }"
-      >
-        <a-table-column
-          title="用户名"
-          data-index="username"
-          :width="110"
-        />
-        <a-table-column
-          title="昵称"
-          data-index="nickname"
-        />
-        <a-table-column
-          title="状态"
-          data-index="status"
-          :width="90"
+      <a-alert
+        v-if="currentGroup && !membersKnown"
+        type="info"
+        show-icon
+        style="margin-bottom: 12px"
+        message="当前后端未提供组成员查询接口"
+        description="下方两个列表均为全部用户：勾选「加入」或「移除」后一次提交；变更结果可在用户的有效模型预览中验证。"
+      />
+
+      <template v-if="membersKnown">
+        <p class="section-title">
+          当前成员（勾选移除）
+        </p>
+        <a-table
+          :data-source="currentMembers"
+          :pagination="false"
+          row-key="id"
+          size="small"
+          :row-selection="{
+            selectedRowKeys: removeSelected,
+            onChange: (keys: string[]) => (removeSelected = keys),
+          }"
+          :locale="{ emptyText: '该组暂无成员' }"
         >
-          <template #default="{ text }">
-            <a-tag :color="text === 'active' ? 'green' : 'red'">
-              {{ text === 'active' ? '启用' : '禁用' }}
-            </a-tag>
-          </template>
-        </a-table-column>
-      </a-table>
+          <a-table-column
+            title="用户名"
+            data-index="username"
+            :width="140"
+          />
+          <a-table-column
+            title="状态"
+            data-index="status"
+            :width="100"
+          >
+            <template #default="{ text }">
+              <a-tag :color="text === 'active' ? 'green' : 'red'">
+                {{ text === 'active' ? '启用' : '禁用' }}
+              </a-tag>
+            </template>
+          </a-table-column>
+        </a-table>
+      </template>
 
       <p
         class="section-title"
-        style="margin-top: 20px"
+        :style="membersKnown ? 'margin-top: 20px' : ''"
       >
         加入成员（勾选加入）
       </p>
@@ -404,17 +420,43 @@ onMounted(() => {
         <a-table-column
           title="用户名"
           data-index="username"
-          :width="110"
+          :width="140"
         />
         <a-table-column
-          key="nickname"
-          title="昵称"
+          key="label"
+          title="状态"
         >
           <template #default="{ record }">
             {{ userLabel(record) }}
           </template>
         </a-table-column>
       </a-table>
+
+      <template v-if="!membersKnown">
+        <p
+          class="section-title"
+          style="margin-top: 20px"
+        >
+          移除成员（勾选移除）
+        </p>
+        <a-table
+          :data-source="allUsers"
+          :pagination="false"
+          row-key="id"
+          size="small"
+          :row-selection="{
+            selectedRowKeys: removeSelected,
+            onChange: (keys: string[]) => (removeSelected = keys),
+          }"
+          :locale="{ emptyText: '暂无用户' }"
+        >
+          <a-table-column
+            title="用户名"
+            data-index="username"
+            :width="140"
+          />
+        </a-table>
+      </template>
 
       <template #footer>
         <a-space>

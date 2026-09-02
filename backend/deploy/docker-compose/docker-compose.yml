@@ -39,9 +39,14 @@ services:
       dockerfile: deploy/docker-compose/Dockerfile
     environment:
       TAH_LISTEN_ADDR: :8081
+      TAH_MYSQL_HOST: mysql:3306
+      TAH_MYSQL_USER: tah
+      TAH_MYSQL_DATABASE: tah
+      TAH_MYSQL_PASSWORD_FILE: /run/secrets/mysql_password
+      TAH_REDIS_ADDR: redis:6379
       TAH_BOOTSTRAP_ADMIN_USERNAME: ${TAH_BOOTSTRAP_ADMIN_USERNAME:-admin}
       TAH_BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
-    secrets: [bootstrap_admin_password]
+    secrets: [bootstrap_admin_password, mysql_password]
     depends_on:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
@@ -59,16 +64,26 @@ services:
       TAH_COOKIE_SECURE: ${TAH_COOKIE_SECURE:-true}
       TAH_MAX_INFLIGHT_PER_USER: ${TAH_MAX_INFLIGHT_PER_USER:-2}
       TAH_MAX_INFLIGHT_SYSTEM: ${TAH_MAX_INFLIGHT_SYSTEM:-20}
+      TAH_MYSQL_HOST: mysql:3306
+      TAH_MYSQL_USER: tah
+      TAH_MYSQL_DATABASE: tah
+      TAH_MYSQL_PASSWORD_FILE: /run/secrets/mysql_password
+      TAH_REDIS_ADDR: redis:6379
       TAH_BOOTSTRAP_ADMIN_USERNAME: ${TAH_BOOTSTRAP_ADMIN_USERNAME:-admin}
       TAH_BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
       PI_DATA_DIR: /var/lib/tah/pi-sessions
-      PI_MODELS_FILE: /run/secrets/pi_models_json
+      # PI reads custom models from $PI_CODING_AGENT_DIR/models.json. This
+      # read-only secret is never passed through the Hub API or process argv.
+      PI_CODING_AGENT_DIR: /run/secrets
     secrets:
       - source: pi_models_json
-        target: pi_models_json
+        target: models.json
         mode: 0400
       - source: bootstrap_admin_password
         target: bootstrap_admin_password
+        mode: 0400
+      - source: mysql_password
+        target: mysql_password
         mode: 0400
     volumes: [pi_sessions:/var/lib/tah/pi-sessions]
     depends_on:

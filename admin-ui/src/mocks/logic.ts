@@ -1,34 +1,12 @@
 /**
  * Mock 后端纯逻辑（可被单测直接覆盖）：
- * 有效模型计算、Provider 无密钥同步、正文过滤分页、审计、登录限流等。
- * 规则来源：docs/system-requirements.md §5、docs/program-design.md §4.3/§8.4。
+ * 有效模型计算、Provider 无密钥同步、正文过滤分页、登录限流等。
+ * 规则来源：docs/system-requirements.md §5、docs/program-design.md §4.3/§8.4，
+ * 线格式细节与 backend/api/internal/handler/hub 的真实实现对齐。
  */
 import type { HubDb } from './db';
-import type {
-  SeedConversation,
-  SeedGrant,
-  SeedGroup,
-  SeedModel,
-  SeedUsage,
-  SeedUser,
-  SessionEntry,
-} from './fixtures';
-import type {
-  AdminConversation,
-  AdminGroup,
-  AdminUser,
-  AuditAction,
-  AuditEntry,
-  EffectiveModel,
-  Grant,
-  MessageStatus,
-  ModelSummary,
-  ProviderRegistration,
-  ReviewFeedback,
-  UsageRecord,
-  UsageSummary,
-  VisibleMessage,
-} from '@/api/types';
+import type { SeedGroup, SeedModel, SeedUser, SessionEntry } from './fixtures';
+import type { EffectiveModel } from '@/api/types';
 
 // ---------------------------------------------------------------------------
 // 通用工具
@@ -77,66 +55,21 @@ export function userActiveGroupIds(db: HubDb, userId: string): string[] {
   return db.groups.filter((g) => g.status === 'active' && g.member_ids.includes(userId)).map((g) => g.id);
 }
 
-export function validateNewUser(payload: {
-  username?: string;
-  nickname?: string;
-  email?: string;
-  role?: string;
-  password?: string;
-}): string | null {
-  if (!payload || typeof payload.username !== 'string' || !/^[a-zA-Z0-9_]{3,32}$/.test(payload.username)) {
+export function validateUsername(username: string): string | null {
+  if (!/^[a-zA-Z0-9_]{3,32}$/.test(username)) {
     return '用户名需为 3-32 位字母、数字或下划线';
   }
-  if (!payload.nickname || payload.nickname.trim().length === 0 || payload.nickname.length > 32) {
-    return '昵称不能为空且不超过 32 个字符';
-  }
-  if (!payload.email || !/^\S+@\S+\.\S+$/.test(payload.email)) {
-    return '邮箱格式不正确';
-  }
-  if (payload.role !== 'admin' && payload.role !== 'user') {
-    return '角色只能是 admin 或 user';
-  }
-  if (payload.password !== undefined && payload.password.length < 8) {
-    return '密码长度至少 8 位';
-  }
   return null;
 }
+
+/** 与真实后端 pbkdf2 哈希前的密码策略一致：至少 12 位。 */
+export const MIN_PASSWORD_LENGTH = 12;
 
 export function validatePassword(password: string): string | null {
-  if (password.length < 8 || password.length > 64) {
-    return '密码长度需为 8-64 位';
+  if (password.length < MIN_PASSWORD_LENGTH || password.length > 64) {
+    return `密码长度需为 ${MIN_PASSWORD_LENGTH}-64 位`;
   }
   return null;
-}
-
-/** 响应映射白名单：绝不输出 password。 */
-export function toAdminUser(db: HubDb, user: SeedUser): AdminUser {
-  const groups = db.groups.filter((g) => g.member_ids.includes(user.id));
-  return {
-    id: user.id,
-    username: user.username,
-    nickname: user.nickname,
-    email: user.email,
-    role: user.role,
-    status: user.status,
-    group_ids: groups.map((g) => g.id),
-    group_names: groups.map((g) => g.name),
-    created_at: user.created_at,
-    updated_at: user.updated_at,
-  };
-}
-
-export function toAdminGroup(group: SeedGroup): AdminGroup {
-  return {
-    id: group.id,
-    name: group.name,
-    description: group.description,
-    status: group.status,
-    member_ids: [...group.member_ids],
-    member_count: group.member_ids.length,
-    created_at: group.created_at,
-    updated_at: group.updated_at,
-  };
 }
 
 // ---------------------------------------------------------------------------
@@ -208,11 +141,7 @@ function modelId(provider: string, upstreamId: string): string {
  * - 既有模型保持 enabled 不变；
  * - Provider 状态恢复 active，刷新 last_synced_at。
  */
-export function applyProviderSyncSuccess(
-  db: HubDb,
-  manifest: ProviderManifest[],
-  now: string,
-): void {
+export function applyProviderSyncSuccess(db: HubDb, manifest: ProviderManifest[], now: string): void {
   for (const entry of manifest) {
     let provider = db.providers.find((p) => p.provider === entry.provider);
     if (!provider) {
@@ -259,71 +188,12 @@ export function applyProviderSyncFailure(db: HubDb, code: string, message: strin
   db.lastSyncError = { code, message };
 }
 
-/** Provider / Model 响应字段白名单映射。 */
-export function toModelSummary(model: SeedModel): ModelSummary {
-  return {
-    id: model.id,
-    name: model.name,
-    provider: model.provider,
-    upstream_model_id: model.upstream_model_id,
-    enabled: model.enabled,
-    available: model.available,
-  };
-}
-
-export function toProviderRegistration(db: HubDb, provider: {
-  provider: string;
-  name: string;
-  status: 'active' | 'stale';
-  last_synced_at: string | null;
-}): ProviderRegistration {
-  return {
-    provider: provider.provider,
-    name: provider.name,
-    status: provider.status,
-    last_synced_at: provider.last_synced_at,
-    models: db.models.filter((m) => m.provider === provider.provider).map(toModelSummary),
-  };
-}
-
 // ---------------------------------------------------------------------------
 // 会话与正文
 // ---------------------------------------------------------------------------
 
-export function computeConversationStatus(
-  db: HubDb,
-  conversation: SeedConversation,
-): 'active' | 'generating' | 'readonly' {
-  if (conversation.generating) {
-    return 'generating';
-  }
-  const effective = computeEffectiveModels(db, conversation.owner_id);
-  if (!effective.some((m) => m.id === conversation.model_id)) {
-    return 'readonly';
-  }
-  return 'active';
-}
-
 export function countVisibleMessages(entries: SessionEntry[]): number {
   return entries.filter((e) => e.kind === 'message').length;
-}
-
-export function toAdminConversation(db: HubDb, conversation: SeedConversation): AdminConversation {
-  const owner = findUser(db, conversation.owner_id);
-  const model = findModel(db, conversation.model_id);
-  return {
-    id: conversation.id,
-    owner_id: conversation.owner_id,
-    owner_username: owner?.username ?? conversation.owner_id,
-    model_id: conversation.model_id,
-    model_name: model?.name ?? conversation.model_id,
-    title: conversation.title,
-    status: computeConversationStatus(db, conversation),
-    hidden: conversation.hidden,
-    message_count: countVisibleMessages(db.sessions[conversation.id] ?? []),
-    created_at: conversation.created_at,
-    updated_at: conversation.updated_at,
-  };
 }
 
 /** 正文白名单：只输出 id/role/content/status/created_at，过滤 thinking、control、tool_call。 */
@@ -331,7 +201,7 @@ export function filterVisibleEntries(
   entries: SessionEntry[],
   since: string | null,
   limit: number,
-): { items: VisibleMessage[]; next_since: string | null; has_more: boolean } {
+): { items: Array<{ id: string; role: 'user' | 'assistant'; content: string; status: 'completed' | 'aborted' | 'error'; created_at: string }>; next_since: string | null; has_more: boolean } {
   const visible = entries.filter((e) => e.kind === 'message') as Array<{
     kind: 'message';
     id: string;
@@ -339,14 +209,13 @@ export function filterVisibleEntries(
     content: string;
     status: 'completed' | 'aborted' | 'error';
     created_at: string;
-  }>;
-  const after = since ? visible.filter((e) => e.id > since) : visible;
+  }>;  const after = since ? visible.filter((e) => e.id > since) : visible;
   const slice = after.slice(0, Math.max(1, limit));
-  const items: VisibleMessage[] = slice.map((e) => ({
+  const items = slice.map((e) => ({
     id: e.id,
     role: e.role,
     content: e.content,
-    status: e.status satisfies MessageStatus,
+    status: e.status,
     created_at: e.created_at,
   }));
   const hasMore = after.length > items.length;
@@ -355,118 +224,7 @@ export function filterVisibleEntries(
 }
 
 // ---------------------------------------------------------------------------
-// 授权
-// ---------------------------------------------------------------------------
-
-export function toGrant(db: HubDb, grant: SeedGrant): Grant {
-  const subjectName =
-    grant.subject_type === 'user'
-      ? (findUser(db, grant.subject_id)?.nickname ?? grant.subject_id)
-      : (findGroup(db, grant.subject_id)?.name ?? grant.subject_id);
-  return {
-    subject_type: grant.subject_type,
-    subject_id: grant.subject_id,
-    subject_name: subjectName,
-    model_id: grant.model_id,
-    model_name: findModel(db, grant.model_id)?.name ?? grant.model_id,
-    created_at: grant.created_at,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// 用量
-// ---------------------------------------------------------------------------
-
-export function toUsageRecord(db: HubDb, record: SeedUsage): UsageRecord {
-  return {
-    request_id: record.request_id,
-    conversation_id: record.conversation_id,
-    user_id: record.user_id,
-    username: findUser(db, record.user_id)?.username ?? record.user_id,
-    model_id: record.model_id,
-    model_name: findModel(db, record.model_id)?.name ?? record.model_id,
-    status: record.status,
-    started_at: record.started_at,
-    ended_at: record.ended_at,
-    input_tokens: record.input_tokens,
-    output_tokens: record.output_tokens,
-    total_tokens: record.total_tokens,
-  };
-}
-
-/** 汇总：只统计已知值，未知记录数单列，不伪造估算值。 */
-export function usageSummary(records: UsageRecord[]): UsageSummary {
-  const sum = (pick: (r: UsageRecord) => number | null): number | null => {
-    const known = records.map(pick).filter((v): v is number => typeof v === 'number');
-    if (known.length === 0) {
-      return null;
-    }
-    return known.reduce((acc, v) => acc + v, 0);
-  };
-  return {
-    calls: records.length,
-    success: records.filter((r) => r.status === 'success').length,
-    error: records.filter((r) => r.status === 'error').length,
-    aborted: records.filter((r) => r.status === 'aborted').length,
-    input_tokens: sum((r) => r.input_tokens),
-    output_tokens: sum((r) => r.output_tokens),
-    total_tokens: sum((r) => r.total_tokens),
-    unknown_token_records: records.filter((r) => r.total_tokens === null).length,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// 审计
-// ---------------------------------------------------------------------------
-
-export interface NewAuditEntry {
-  actor_id: string;
-  actor_username: string;
-  action: AuditAction;
-  object_type: string;
-  object_id: string;
-  result: 'success' | 'failed';
-  detail: string;
-  trace_id?: string;
-}
-
-export function appendAudit(db: HubDb, entry: NewAuditEntry, now: string, traceId?: string): AuditEntry {
-  const id = `audit_${String(db.seq.audit).padStart(4, '0')}`;
-  db.seq.audit += 1;
-  const trace = entry.trace_id ?? traceId ?? `tr_${Math.random().toString(36).slice(2, 10)}`;
-  const row: AuditEntry = {
-    id,
-    actor_id: entry.actor_id,
-    actor_username: entry.actor_username,
-    action: entry.action,
-    object_type: entry.object_type,
-    object_id: entry.object_id,
-    result: entry.result,
-    detail: entry.detail,
-    trace_id: trace,
-    created_at: now,
-  };
-  db.audit.push({
-    id: row.id,
-    actor_id: row.actor_id,
-    actor_username: row.actor_username,
-    action: row.action,
-    object_type: row.object_type,
-    object_id: row.object_id,
-    result: row.result,
-    detail: row.detail,
-    trace_id: row.trace_id,
-    created_at: row.created_at,
-  });
-  return row;
-}
-
-export function makeReviewFeedback(recorded: boolean, traceId: string, result: 'success' | 'failed'): ReviewFeedback {
-  return { recorded, trace_id: traceId, result };
-}
-
-// ---------------------------------------------------------------------------
-// 登录限流（AUTH-06 mock）
+// 登录限流（AUTH-06 mock：5 次失败冷却 60 秒，与真实后端一致）
 // ---------------------------------------------------------------------------
 
 export const LOGIN_MAX_FAILURES = 5;

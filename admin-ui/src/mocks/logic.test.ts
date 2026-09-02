@@ -1,6 +1,7 @@
 /**
  * Mock 后端纯逻辑测试：有效模型、Provider 无密钥同步、正文过滤、
- * 会话状态、用量汇总、登录限流与安全字段白名单。
+ * 密码策略、登录限流与安全字段白名单。
+ * 线格式行为（Go 风格键、白名单请求体、审计动作等）见 handlers.test.ts。
  */
 import { describe, expect, it } from 'vitest';
 
@@ -9,21 +10,16 @@ import { createDb } from './db';
 import {
   LOGIN_COOLDOWN_MS,
   SUCCESS_MANIFEST,
-  appendAudit,
   applyProviderSyncFailure,
   applyProviderSyncSuccess,
   checkLoginAllowed,
-  computeConversationStatus,
   computeEffectiveModels,
   filterVisibleEntries,
   recordLoginFailure,
   recordLoginSuccess,
-  toAdminConversation,
-  toAdminUser,
-  toProviderRegistration,
-  usageSummary,
+  validatePassword,
+  validateUsername,
 } from './logic';
-import type { UsageRecord } from '@/api/types';
 
 function freshDb(): HubDb {
   return createDb();
@@ -118,16 +114,11 @@ describe('provider sync', () => {
     expect(db.lastSyncError).toEqual({ code: 'PI_UNAVAILABLE', message: 'PI Agent 暂不可用' });
   });
 
-  it('Provider / Model 响应白名单中不出现任何密钥类字段', () => {
+  it('同步清单不含任何密钥类字段', () => {
     const db = freshDb();
     applyProviderSyncSuccess(db, SUCCESS_MANIFEST, '2026-09-01T12:00:00Z');
-    for (const provider of db.providers) {
-      const payload = JSON.stringify(toProviderRegistration(db, provider));
-      expect(payload).not.toMatch(FORBIDDEN_PATTERN);
-      for (const key of Object.keys(toProviderRegistration(db, provider))) {
-        expect(['provider', 'name', 'status', 'last_synced_at', 'models']).toContain(key);
-      }
-    }
+    const serialized = JSON.stringify(db.models) + JSON.stringify(db.providers);
+    expect(serialized).not.toMatch(FORBIDDEN_PATTERN);
   });
 });
 
@@ -178,87 +169,21 @@ describe('filterVisibleEntries', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 会话状态（program-design §4.2）
+// 密码与用户名策略（与真实后端一致：至少 12 位）
 // ---------------------------------------------------------------------------
 
-describe('conversation status', () => {
-  it('generating 优先；模型失效后只读；正常授权活跃；用户隐藏不影响状态且管理员可见', () => {
-    const db = freshDb();
-    expect(computeConversationStatus(db, db.conversations.find((c) => c.id === 'c_6')!)).toBe('generating');
-
-    applyProviderSyncSuccess(db, SUCCESS_MANIFEST, '2026-09-01T12:00:00Z');
-    // c_3 使用 deepseek-reasoner，同步后清单缺失 → readonly
-    expect(computeConversationStatus(db, db.conversations.find((c) => c.id === 'c_3')!)).toBe('readonly');
-    // c_1 授权有效 → active
-    expect(computeConversationStatus(db, db.conversations.find((c) => c.id === 'c_1')!)).toBe('active');
-
-    // c_4：用户已隐藏且当前无模型授权 → readonly；隐藏只影响可见性，索引仍对管理员可见
-    const hidden = toAdminConversation(db, db.conversations.find((c) => c.id === 'c_4')!);
-    expect(hidden.hidden).toBe(true);
-    expect(hidden.status).toBe('readonly');
+describe('password policy', () => {
+  it('密码至少 12 位，至多 64 位', () => {
+    expect(validatePassword('short')).toBe('密码长度需为 12-64 位');
+    expect(validatePassword('a'.repeat(11))).not.toBeNull();
+    expect(validatePassword('a'.repeat(12))).toBeNull();
+    expect(validatePassword('a'.repeat(65))).not.toBeNull();
   });
 
-  it('撤销授权立即影响状态计算（历史会话变只读，不删除会话）', () => {
-    const db = freshDb();
-    db.grants = db.grants.filter((g) => !(g.subject_type === 'user' && g.subject_id === 'u_alice'));
-    const eng = db.groups.find((g) => g.id === 'g_eng')!;
-    eng.member_ids = eng.member_ids.filter((id) => id !== 'u_alice');
-    expect(computeConversationStatus(db, db.conversations.find((c) => c.id === 'c_1')!)).toBe('readonly');
-    expect(db.conversations.find((c) => c.id === 'c_1')!).toBeDefined();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 用量汇总（§5.3 / MP-04）
-// ---------------------------------------------------------------------------
-
-describe('usageSummary', () => {
-  function record(overrides: Partial<UsageRecord>): UsageRecord {
-    return {
-      request_id: 'r',
-      conversation_id: 'c',
-      user_id: 'u',
-      username: 'u',
-      model_id: 'm',
-      model_name: 'm',
-      status: 'success',
-      started_at: '2026-09-01T00:00:00Z',
-      ended_at: '2026-09-01T00:00:01Z',
-      input_tokens: 1,
-      output_tokens: 2,
-      total_tokens: 3,
-      ...overrides,
-    };
-  }
-
-  it('只汇总已知 Token，未知记录单列，不伪造估算值', () => {
-    const summary = usageSummary([
-      record({}),
-      record({ input_tokens: null, output_tokens: null, total_tokens: null, status: 'error' }),
-      record({
-        status: 'aborted',
-        input_tokens: null,
-        output_tokens: null,
-        total_tokens: null,
-      }),
-    ]);
-    expect(summary.calls).toBe(3);
-    expect(summary.success).toBe(1);
-    expect(summary.error).toBe(1);
-    expect(summary.aborted).toBe(1);
-    expect(summary.input_tokens).toBe(1);
-    expect(summary.output_tokens).toBe(2);
-    expect(summary.total_tokens).toBe(3);
-    expect(summary.unknown_token_records).toBe(2);
-  });
-
-  it('全部未知时 Token 汇总为 null', () => {
-    const summary = usageSummary([
-      record({ input_tokens: null, output_tokens: null, total_tokens: null }),
-    ]);
-    expect(summary.input_tokens).toBeNull();
-    expect(summary.output_tokens).toBeNull();
-    expect(summary.total_tokens).toBeNull();
+  it('用户名 3-32 位字母数字下划线', () => {
+    expect(validateUsername('ab')).not.toBeNull();
+    expect(validateUsername('alice_01')).toBeNull();
+    expect(validateUsername('不合法')).not.toBeNull();
   });
 });
 
@@ -291,47 +216,5 @@ describe('login rate limit', () => {
       recordLoginFailure(db, 'oscar', now + 10 + i);
     }
     expect(checkLoginAllowed(db, 'oscar', now + 14).allowed).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 审计（AU-11 / AU-12）
-// ---------------------------------------------------------------------------
-
-describe('appendAudit', () => {
-  it('追加审计记录并生成 trace_id', () => {
-    const db = freshDb();
-    const before = db.audit.length;
-    const row = appendAudit(
-      db,
-      {
-        actor_id: 'u_admin',
-        actor_username: 'admin',
-        action: 'CONVERSATION_REVIEW',
-        object_type: 'conversation',
-        object_id: 'c_1',
-        result: 'success',
-        detail: '审阅会话 c_1 正文',
-      },
-      '2026-09-01T12:00:00Z',
-      'tr_test_1',
-    );
-    expect(db.audit.length).toBe(before + 1);
-    expect(row.trace_id).toBe('tr_test_1');
-    expect(row.id).toMatch(/^audit_\d{4}$/);
-    expect(db.audit.at(-1)!.action).toBe('CONVERSATION_REVIEW');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 响应安全（密钥零泄漏）
-// ---------------------------------------------------------------------------
-
-describe('response safety', () => {
-  it('用户响应不包含密码字段', () => {
-    const db = freshDb();
-    const payload = JSON.stringify(toAdminUser(db, db.users[0]!));
-    expect(payload).not.toMatch(FORBIDDEN_PATTERN);
-    expect(payload).not.toContain('admin123');
   });
 });
