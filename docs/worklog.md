@@ -17,7 +17,10 @@
 - 尝试启动完整开发 Compose 时，Docker daemon 初始未运行；启动 OrbStack 后恢复。
 - 完整构建/拉取因镜像网络下载超时未完成；随后先启动共用基础组件。
 - 已成功启动 `mysql:8.4` 和 `redis:7.4.2-alpine`，并确认两者健康。
+- 迁移容器已执行成功并退出码为 0。
+- session-ui Docker 容器已启动并可返回 HTTP 200；admin-ui 容器仍在首次依赖安装，core-api/core-rpc 镜像构建因网络下载超时尚未完成。
 - 调试方法、组件复用、挂载路径和常用命令已补充到 `docs/deployment.md`。
+- 本次文档与 Compose 更新已提交并推送：`214c733 chore: document docker development workflow`。
 
 - 新增 `docker-compose.dev.yml`，将开发所需 MySQL、Redis、迁移、core-api、core-rpc、session-ui 和 admin-ui 统一容器化。
 - 新增项目根目录 `data/`，用于本地开发的 MySQL、Redis、PI Session 数据挂载：
